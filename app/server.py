@@ -1139,4 +1139,13 @@ def main():
     httpd.serve_forever()
 
 if __name__ == "__main__":
-    main()
+    import os
+    from http.server import ThreadingHTTPServer
+
+    HOST = "0.0.0.0"
+    PORT = int(os.environ.get("PORT", "10000"))
+
+    print(f"Starting server on {HOST}:{PORT}")
+    httpd = ThreadingHTTPServer((HOST, PORT), Handler)
+    httpd.serve_forever()
+
