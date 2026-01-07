@@ -1,8 +1,15 @@
 #!/usr/bin/env python3
-import os, json, base64, glob, secrets, urllib.parse, mimetypes, smtplib, struct, hmac, hashlib
+import os, json, base64, glob, secrets, urllib.parse, mimetypes, struct, hmac, hashlib
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from datetime import datetime, timezone
-from email.message import EmailMessage
+
+# NOTE:
+# - This revised version is Render-safe and eliminates 502s caused by SMTP attempts.
+# - "Envoyer" becomes "Generate links (manual send)".
+# - Links are displayed on-screen + saved to db/contracts/<cid>/email_log.json
+# - Status tracking: draft -> to_sign -> signed_client/signed_rep -> signed (both)
+# - Public routes include /sign/done (fixes login bounce + black screens)
+# - Robust error handling: no unhandled exceptions -> no Render 502
 
 # -------------------------
 # Paths
@@ -12,7 +19,7 @@ WWW  = os.path.join(ROOT, "www")
 ASSETS = os.path.join(WWW, "assets")
 CFG_PX  = os.path.join(ROOT, "cfg", "field_map_px.json")
 DB   = os.path.join(ROOT, "db", "contracts")
-SETTINGS_PATH = os.path.join(os.path.dirname(__file__), "settings.json")
+SETTINGS_PATH = os.path.join(ROOT, "settings.json")
 
 os.makedirs(DB, exist_ok=True)
 
@@ -59,6 +66,8 @@ def load_settings():
     # legacy alias
     if isinstance(s.get("users"), dict) and not s.get("sales_users"):
         s["sales_users"] = s["users"]
+    # OPTIONAL: allow forcing the base URL (useful if you want to override headers)
+    # s.setdefault("public_base_url", "")
     return s
 
 def sessions_load():
@@ -340,38 +349,19 @@ def mark_signed_if_complete(cid):
         set_status(cid, "signed_client")
     elif has_rep:
         set_status(cid, "signed_rep")
-    # else: do nothing (keep current)
 
 def base_url(handler):
+    # Prefer explicit public URL in settings if provided
+    settings = load_settings()
+    forced = (settings or {}).get("public_base_url", "") if isinstance(settings, dict) else ""
+    forced = (forced or "").strip().rstrip("/")
+    if forced:
+        return forced
+
     proto = handler.headers.get("X-Forwarded-Proto")
     host  = handler.headers.get("X-Forwarded-Host") or handler.headers.get("Host") or "localhost"
     scheme = "https" if proto == "https" else "http"
-    return f"{scheme}://{host}"
-
-def send_email(settings, to_email, subject, body):
-    smtp = (settings or {}).get("smtp", {})
-    if not smtp.get("enabled"):
-        return False, "SMTP disabled"
-    msg = EmailMessage()
-    msg["Subject"] = subject
-    msg["From"] = smtp.get("from_email", smtp.get("username","no-reply@localhost"))
-    msg["To"] = to_email
-    msg.set_content(body)
-    host = smtp.get("host")
-    port = int(smtp.get("port", 587))
-    user = smtp.get("username")
-    pwd  = smtp.get("password")
-    use_tls = bool(smtp.get("use_tls", True))
-
-    with smtplib.SMTP(host, port, timeout=25) as s:
-        s.ehlo()
-        if use_tls:
-            s.starttls()
-            s.ehlo()
-        if user and pwd:
-            s.login(user, pwd)
-        s.send_message(msg)
-    return True, "sent"
+    return f"{scheme}://{host}".rstrip("/")
 
 # -------------------------
 # HTTP Handler
@@ -383,6 +373,11 @@ class H(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/plain; charset=utf-8")
         self.send_header("Content-Length", "0")
         self.end_headers()
+
+    # Avoid noisy default logging (optional)
+    def log_message(self, format, *args):
+        # Keep Render logs clean. Comment out to restore default.
+        return
 
     def settings(self):
         return load_settings()
@@ -414,103 +409,112 @@ class H(BaseHTTPRequestHandler):
     def redirect_login(self):
         return self.redirect("/login")
 
+    # --------
+    # GET
+    # --------
     def do_GET(self):
-        u = urllib.parse.urlparse(self.path)
-        path = u.path
-        q = urllib.parse.parse_qs(u.query)
+        try:
+            u = urllib.parse.urlparse(self.path)
+            path = u.path
+            q = urllib.parse.parse_qs(u.query)
 
-        # Route aliases (avoid UI mismatch)
-        if path == "/contracts":
-            return self.redirect("/contract" + (("?" + u.query) if u.query else ""))
+            # Route aliases (avoid UI mismatch)
+            if path == "/contracts":
+                return self.redirect("/contract" + (("?" + u.query) if u.query else ""))
 
-        # Static assets
-        if path.startswith("/assets/"):
-            f = os.path.join(WWW, path.lstrip("/"))
-            return self.serve_file(f, None)
+            # Static assets
+            if path.startswith("/assets/"):
+                f = os.path.join(WWW, path.lstrip("/"))
+                return self.serve_file(f, None)
 
-        # Login/logout
-        if path in ("/login", "/logout"):
-            if path == "/logout":
-                s = self.settings()
-                cookie_name = (s.get("auth") or {}).get("cookie_name", "sid")
-                self.send_response(302)
-                self.send_header("Location", "/login")
-                self.send_header("Set-Cookie", f"{cookie_name}=; Path=/; Max-Age=0")
+            # Login/logout
+            if path in ("/login", "/logout"):
+                if path == "/logout":
+                    s = self.settings()
+                    cookie_name = (s.get("auth") or {}).get("cookie_name", "sid")
+                    self.send_response(302)
+                    self.send_header("Location", "/login")
+                    self.send_header("Set-Cookie", f"{cookie_name}=; Path=/; Max-Age=0")
+                    self.end_headers()
+                    return
+                tpl = read_text(os.path.join(WWW, "login.html"))
+                return self.send_html(tpl)
+
+            # Public routes (must not require login)
+            # IMPORTANT: include /sign/done so client/rep can finish without being bounced to login
+            public_prefixes = ("/sign", "/contract/signature_image", "/contract/print")
+            if not path.startswith(public_prefixes):
+                if not self.require_login():
+                    return self.redirect_login()
+
+            if path in ("/", "/sales"):
+                tpl = read_text(os.path.join(WWW, "sales.html"))
+                user = self.current_user() or ""
+                return self.send_html(tpl.replace("<!--USER-->", esc(user)))
+
+            # ---- search api
+            if path == "/api/contracts_search":
+                term = (q.get("q", [""])[0] or "").strip().lower()
+                out = []
+                for cid_path in glob.glob(os.path.join(DB, "*")):
+                    cid = os.path.basename(cid_path)
+                    b = read_json(os.path.join(cid_path, "contract.json"), None)
+                    if not isinstance(b, dict):
+                        continue
+                    fields = b.get("fields", {}) if isinstance(b.get("fields", {}), dict) else {}
+                    meta = b.get("meta", {}) if isinstance(b.get("meta", {}), dict) else {}
+
+                    tokens = [cid]
+                    def add(v):
+                        if v is None:
+                            return
+                        v = str(v).strip()
+                        if v:
+                            tokens.append(v)
+
+                    add(deep_get(fields, "contract.quote_number"))
+                    add(deep_get(fields, "client.first_name"))
+                    add(deep_get(fields, "client.last_name"))
+                    add(deep_get(fields, "client.phone_main"))
+                    add(deep_get(fields, "client.address_full"))
+                    add(deep_get(fields, "vendor.rep_name_print"))
+
+                    blob = " ".join(tokens).lower()
+                    if term and term not in blob:
+                        continue
+
+                    out.append({
+                        "contract_id": cid,
+                        "quote": deep_get(fields, "contract.quote_number") or "",
+                        "client": ((deep_get(fields, "client.first_name") or "") + " " + (deep_get(fields, "client.last_name") or "")).strip(),
+                        "phone": deep_get(fields, "client.phone_main") or "",
+                        "address": deep_get(fields, "client.address_full") or "",
+                        "status": meta.get("status", ""),
+                        "updated_at": meta.get("updated_at") or meta.get("created_at") or "",
+                    })
+
+                out.sort(key=lambda r: r.get("updated_at") or "", reverse=True)
+                payload = json.dumps({"ok": True, "results": out[:200]}, ensure_ascii=False).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(payload)))
                 self.end_headers()
+                self.wfile.write(payload)
                 return
-            tpl = read_text(os.path.join(WWW, "login.html"))
-            return self.send_html(tpl)
 
-        # Public routes (must not require login)
-        # IMPORTANT: include /sign/done so client/rep can finish without being bounced to login
-        public_prefixes = ("/sign", "/contract/signature_image", "/contract/print")
-        if not path.startswith(public_prefixes):
-            if not self.require_login():
-                return self.redirect_login()
+            # ---- SEND PAGE (GET)
+            if path == "/contract/send":
+                cid = (q.get("id", [""])[0] or "").strip()
+                if not cid:
+                    return self.send_text("missing id", 400)
+                ensure_contract(cid)
 
-        if path in ("/", "/sales"):
-            tpl = read_text(os.path.join(WWW, "sales.html"))
-            user = self.current_user() or ""
-            return self.send_html(tpl.replace("<!--USER-->", esc(user)))
+                # If links already exist, show them too
+                elog = read_json(os.path.join(cdir(cid), "email_log.json"), {})
+                existing_client = (elog or {}).get("client_link", "")
+                existing_rep = (elog or {}).get("rep_link", "")
 
-        # ---- search api
-        if path == "/api/contracts_search":
-            term = (q.get("q", [""])[0] or "").strip().lower()
-            out = []
-            for cid_path in glob.glob(os.path.join(DB, "*")):
-                cid = os.path.basename(cid_path)
-                b = read_json(os.path.join(cid_path, "contract.json"), None)
-                if not isinstance(b, dict):
-                    continue
-                fields = b.get("fields", {}) if isinstance(b.get("fields", {}), dict) else {}
-                meta = b.get("meta", {}) if isinstance(b.get("meta", {}), dict) else {}
-
-                tokens = [cid]
-                def add(v):
-                    if v is None:
-                        return
-                    v = str(v).strip()
-                    if v:
-                        tokens.append(v)
-
-                add(deep_get(fields, "contract.quote_number"))
-                add(deep_get(fields, "client.first_name"))
-                add(deep_get(fields, "client.last_name"))
-                add(deep_get(fields, "client.phone_main"))
-                add(deep_get(fields, "client.address_full"))
-                add(deep_get(fields, "vendor.rep_name_print"))
-
-                blob = " ".join(tokens).lower()
-                if term and term not in blob:
-                    continue
-
-                out.append({
-                    "contract_id": cid,
-                    "quote": deep_get(fields, "contract.quote_number") or "",
-                    "client": ((deep_get(fields, "client.first_name") or "") + " " + (deep_get(fields, "client.last_name") or "")).strip(),
-                    "phone": deep_get(fields, "client.phone_main") or "",
-                    "address": deep_get(fields, "client.address_full") or "",
-                    "status": meta.get("status", ""),
-                    "updated_at": meta.get("updated_at") or meta.get("created_at") or "",
-                })
-
-            out.sort(key=lambda r: r.get("updated_at") or "", reverse=True)
-            payload = json.dumps({"ok": True, "results": out[:200]}, ensure_ascii=False).encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Content-Length", str(len(payload)))
-            self.end_headers()
-            self.wfile.write(payload)
-            return
-
-        # ---- SEND PAGE (THIS IS THE MISSING PIECE THAT CAUSED BLACK "NOT FOUND")
-        if path == "/contract/send":
-            cid = q.get("id", [""])[0]
-            if not cid:
-                return self.send_text("missing id", 400)
-            ensure_contract(cid)
-
-            html = f"""<!doctype html><html lang='fr'><head>
+                html = f"""<!doctype html><html lang='fr'><head>
 <meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>
 <title>Envoyer — {esc(cid)}</title>
 <style>
@@ -518,10 +522,14 @@ body{{margin:0;font-family:system-ui;background:#0b0f19;color:#e5e7eb}}
 .top{{padding:12px 14px;background:rgba(17,24,39,.9);border-bottom:1px solid rgba(255,255,255,.10);display:flex;gap:10px;align-items:center;flex-wrap:wrap}}
 .btn{{border:1px solid rgba(255,255,255,.10);border-radius:12px;padding:9px 12px;background:#f5c542;color:#111;font-weight:900;text-decoration:none;cursor:pointer}}
 .btn.secondary{{background:rgba(15,23,42,.80);color:#e5e7eb}}
-.card{{max-width:720px;margin:18px auto;padding:14px;border:1px solid rgba(255,255,255,.10);border-radius:16px;background:rgba(15,23,42,.60)}}
+.card{{max-width:860px;margin:18px auto;padding:14px;border:1px solid rgba(255,255,255,.10);border-radius:16px;background:rgba(15,23,42,.60)}}
 input{{width:100%;padding:10px 12px;border-radius:12px;border:1px solid rgba(255,255,255,.10);background:rgba(15,23,42,.80);color:#e5e7eb}}
 label{{font-weight:900;font-size:13px}}
 .hint{{font-size:12px;opacity:.8}}
+.row{{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin:10px 0}}
+.mono{{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace}}
+small{{opacity:.85}}
+hr{{border:none;border-top:1px solid rgba(255,255,255,.12);margin:14px 0}}
 </style></head><body>
 <div class='top'>
   <a class='btn secondary' href='/contract?id={urllib.parse.quote(cid)}'>Retour</a>
@@ -532,102 +540,117 @@ label{{font-weight:900;font-size:13px}}
     <input type='hidden' name='contract_id' value='{esc(cid)}'>
     <label>Email du client</label><br><input name='client_email' type='email' required><br><br>
     <label>Email du représentant</label><br><input name='rep_email' type='email' required><br><br>
-    <button class='btn' type='submit'>Envoyer les liens</button>
+    <button class='btn' type='submit'>Générer les liens (envoi manuel)</button>
   </form>
-  <p class='hint'>SMTP est optionnel. Si désactivé, les liens sont enregistrés dans <code>db/contracts/{esc(cid)}/email_log.json</code>.</p>
+
+  <p class='hint'>Sur Render: pas d'email sortant sans SMTP externe. Ici on génère les liens et vous les envoyez manuellement (Proton/SMS).</p>
+
+  {"<hr>" if (existing_client or existing_rep) else ""}
+  {f"<div><small>Liens existants (dernier envoi):</small></div>" if (existing_client or existing_rep) else ""}
+  {f"<div class='row'><div style='min-width:120px;font-weight:900'>Client</div><input class='mono' id='l1' value='{esc(existing_client)}' readonly><button class='btn secondary' onclick=\"copy('l1');return false;\">Copier</button></div>" if existing_client else ""}
+  {f"<div class='row'><div style='min-width:120px;font-weight:900'>Représentant</div><input class='mono' id='l2' value='{esc(existing_rep)}' readonly><button class='btn secondary' onclick=\"copy('l2');return false;\">Copier</button></div>" if existing_rep else ""}
 </div>
+
+<script>
+function copy(id){{
+  var el = document.getElementById(id);
+  if(!el) return;
+  el.focus(); el.select();
+  try{{ document.execCommand('copy'); }}catch(e){{}}
+}}
+</script>
 </body></html>"""
-            return self.send_html(html)
+                return self.send_html(html)
 
-        # ---- print signed contract (public)
-        if path == "/contract/print":
-            cid = q.get("id", [""])[0]
-            if not cid:
-                return self.send_text("missing id", 400)
-            ensure_contract(cid)
+            # ---- print signed contract (public)
+            if path == "/contract/print":
+                cid = (q.get("id", [""])[0] or "").strip()
+                if not cid:
+                    return self.send_text("missing id", 400)
+                ensure_contract(cid)
 
-            cfg = read_json(CFG_PX, {"fields": [], "signature_zones": []})
-            fields_map = cfg.get("fields", []) if isinstance(cfg, dict) else []
-            sig_map    = cfg.get("signature_zones", []) if isinstance(cfg, dict) else []
+                cfg = read_json(CFG_PX, {"fields": [], "signature_zones": []})
+                fields_map = cfg.get("fields", []) if isinstance(cfg, dict) else []
+                sig_map    = cfg.get("signature_zones", []) if isinstance(cfg, dict) else []
 
-            b = load_bundle(cid)
-            fields = b.get("fields", {}) if isinstance(b.get("fields"), dict) else {}
-            calc = b.get("calc", {}) if isinstance(b.get("calc"), dict) else {}
-            meta = b.get("meta", {}) if isinstance(b.get("meta"), dict) else {}
-            sigs = signature_state(cid)
+                b = load_bundle(cid)
+                fields = b.get("fields", {}) if isinstance(b.get("fields"), dict) else {}
+                calc = b.get("calc", {}) if isinstance(b.get("calc"), dict) else {}
+                meta = b.get("meta", {}) if isinstance(b.get("meta"), dict) else {}
+                sigs = signature_state(cid)
 
-            pages = sorted(glob.glob(os.path.join(ASSETS, "page_*.png")))
-            sections = []
-            for idx, p in enumerate(pages, start=1):
-                img = os.path.basename(p)
-                dim = png_size(p)
-                if not dim:
-                    continue
-                iw, ih = dim
-                overlay = []
-
-                for fm in fields_map:
-                    if int(fm.get("page", 0)) != idx:
+                pages = sorted(glob.glob(os.path.join(ASSETS, "page_*.png")))
+                sections = []
+                for idx, p in enumerate(pages, start=1):
+                    img = os.path.basename(p)
+                    dim = png_size(p)
+                    if not dim:
                         continue
-                    name = fm["name"]
-                    val = deep_get(fields, name) or ""
-                    cval = calc.get(name)
-                    if cval is None:
-                        cval = deep_get(calc, name)
-                    if cval is not None and str(cval) != "":
-                        val = cval
+                    iw, ih = dim
+                    overlay = []
 
-                    x = float(fm["x"]); y = float(fm["y"]); w = float(fm["w"]); h = float(fm["h"])
-                    x_pct = (x / iw) * 100.0
-                    y_pct = (y / ih) * 100.0
-                    w_pct = (w / iw) * 100.0
-                    h_pct = (h / ih) * 100.0
-                    style = f"left:{x_pct:.6f}%;top:{y_pct:.6f}%;width:{w_pct:.6f}%;height:{h_pct:.6f}%;"
-                    overlay.append(
-                        f"<div class='field' style='{style}'>"
-                        f"<div class='txt'>{esc(val)}</div>"
-                        f"</div>"
+                    for fm in fields_map:
+                        if int(fm.get("page", 0)) != idx:
+                            continue
+                        name = fm["name"]
+                        val = deep_get(fields, name) or ""
+                        cval = calc.get(name)
+                        if cval is None:
+                            cval = deep_get(calc, name)
+                        if cval is not None and str(cval) != "":
+                            val = cval
+
+                        x = float(fm["x"]); y = float(fm["y"]); w = float(fm["w"]); h = float(fm["h"])
+                        x_pct = (x / iw) * 100.0
+                        y_pct = (y / ih) * 100.0
+                        w_pct = (w / iw) * 100.0
+                        h_pct = (h / ih) * 100.0
+                        style = f"left:{x_pct:.6f}%;top:{y_pct:.6f}%;width:{w_pct:.6f}%;height:{h_pct:.6f}%;"
+                        overlay.append(
+                            f"<div class='field' style='{style}'>"
+                            f"<div class='txt'>{esc(val)}</div>"
+                            f"</div>"
+                        )
+
+                    for sm in sig_map:
+                        if int(sm.get("page", 0)) != idx:
+                            continue
+                        who = sm.get("who")
+                        x = float(sm["x"]); y = float(sm["y"]); w = float(sm["w"]); h = float(sm["h"])
+                        x_pct = (x / iw) * 100.0
+                        y_pct = (y / ih) * 100.0
+                        w_pct = (w / iw) * 100.0
+                        h_pct = (h / ih) * 100.0
+                        style = f"left:{x_pct:.6f}%;top:{y_pct:.6f}%;width:{w_pct:.6f}%;height:{h_pct:.6f}%;"
+                        rec = sigs.get(who) or {}
+                        if rec:
+                            if rec.get("mode") == "text":
+                                t = esc(rec.get("sig_text") or "")
+                                ini = esc(rec.get("initials") or "")
+                                overlay.append(
+                                    f"<div class='sigzone' style='{style};border:none'>"
+                                    f"<div style='width:100%;height:100%;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;padding:6px 8px;background:rgba(255,255,255,.0)'>"
+                                    f"<div style='font-family:cursive;font-size:22px;line-height:1'>{t}</div>"
+                                    f"<div style='font-size:12px;font-weight:900;opacity:.75'>{ini}</div>"
+                                    f"</div></div>"
+                                )
+                            else:
+                                v = urllib.parse.quote(str(rec.get("saved_at","")))
+                                overlay.append(
+                                    f"<div class='sigzone' style='{style};border:none'>"
+                                    f"<img src='/contract/signature_image?id={urllib.parse.quote(cid)}&who={urllib.parse.quote(who)}&v={v}' alt='Signature'>"
+                                    f"</div>"
+                                )
+
+                    sections.append(
+                        f"<section class='page'>"
+                        f"<img class='bg' src='/assets/{esc(img)}' alt='Page {idx}'>"
+                        f"<div class='overlay'>{''.join(overlay)}</div>"
+                        f"</section>"
                     )
 
-                for sm in sig_map:
-                    if int(sm.get("page", 0)) != idx:
-                        continue
-                    who = sm.get("who")
-                    x = float(sm["x"]); y = float(sm["y"]); w = float(sm["w"]); h = float(sm["h"])
-                    x_pct = (x / iw) * 100.0
-                    y_pct = (y / ih) * 100.0
-                    w_pct = (w / iw) * 100.0
-                    h_pct = (h / ih) * 100.0
-                    style = f"left:{x_pct:.6f}%;top:{y_pct:.6f}%;width:{w_pct:.6f}%;height:{h_pct:.6f}%;"
-                    rec = sigs.get(who) or {}
-                    if rec:
-                        if rec.get("mode") == "text":
-                            t = esc(rec.get("sig_text") or "")
-                            ini = esc(rec.get("initials") or "")
-                            overlay.append(
-                                f"<div class='sigzone' style='{style};border:none'>"
-                                f"<div style='width:100%;height:100%;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;padding:6px 8px;background:rgba(255,255,255,.0)'>"
-                                f"<div style='font-family:cursive;font-size:22px;line-height:1'>{t}</div>"
-                                f"<div style='font-size:12px;font-weight:900;opacity:.75'>{ini}</div>"
-                                f"</div></div>"
-                            )
-                        else:
-                            v = urllib.parse.quote(str(rec.get("saved_at","")))
-                            overlay.append(
-                                f"<div class='sigzone' style='{style};border:none'>"
-                                f"<img src='/contract/signature_image?id={urllib.parse.quote(cid)}&who={urllib.parse.quote(who)}&v={v}' alt='Signature'>"
-                                f"</div>"
-                            )
-
-                sections.append(
-                    f"<section class='page'>"
-                    f"<img class='bg' src='/assets/{esc(img)}' alt='Page {idx}'>"
-                    f"<div class='overlay'>{''.join(overlay)}</div>"
-                    f"</section>"
-                )
-
-            title = f"Contrat signé — {cid}"
-            html = f"""<!doctype html><html lang='fr'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>{esc(title)}</title>
+                title = f"Contrat signé — {cid}"
+                html = f"""<!doctype html><html lang='fr'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>{esc(title)}</title>
 <style>
 :root{{--page-w:210mm;--page-h:297mm;--ink:#0b0f19;--line:#e6e8ee;--bg:#fff}}
 *{{box-sizing:border-box}}body{{margin:0;font-family:system-ui;background:var(--bg);color:var(--ink)}}
@@ -652,447 +675,513 @@ label{{font-weight:900;font-size:13px}}
   {''.join(sections)}
 </div>
 </body></html>"""
-            return self.send_html(html)
+                return self.send_html(html)
 
-        # ---- mapper tool
-        if path == "/mapper":
-            pageno = int(q.get("page", ["1"])[0] or "1")
-            pages = sorted(glob.glob(os.path.join(ASSETS, "page_*.png")))
-            if pageno < 1 or pageno > len(pages):
-                return self.send_text("bad page", 400)
-            img = os.path.basename(pages[pageno-1])
-            tpl = read_text(os.path.join(WWW, "mapper.html"))
-            html = tpl.replace("<!--PAGENO-->", str(pageno)).replace("<!--IMGURL-->", f"/assets/{esc(img)}")
-            return self.send_html(html)
+            # ---- mapper tool
+            if path == "/mapper":
+                pageno = int(q.get("page", ["1"])[0] or "1")
+                pages = sorted(glob.glob(os.path.join(ASSETS, "page_*.png")))
+                if pageno < 1 or pageno > len(pages):
+                    return self.send_text("bad page", 400)
+                img = os.path.basename(pages[pageno-1])
+                tpl = read_text(os.path.join(WWW, "mapper.html"))
+                html = tpl.replace("<!--PAGENO-->", str(pageno)).replace("<!--IMGURL-->", f"/assets/{esc(img)}")
+                return self.send_html(html)
 
-        # ---- contract view
-        if path in ("/contract",):
-            cid = q.get("id", [None])[0] or ("c_" + secrets.token_hex(8))
-            ensure_contract(cid)
+            # ---- contract view
+            if path in ("/contract",):
+                cid = q.get("id", [None])[0] or ("c_" + secrets.token_hex(8))
+                ensure_contract(cid)
 
-            cfg = read_json(CFG_PX, {"fields": [], "signature_zones": []})
-            fields_map = cfg.get("fields", []) if isinstance(cfg, dict) else []
-            sig_map    = cfg.get("signature_zones", []) if isinstance(cfg, dict) else []
+                cfg = read_json(CFG_PX, {"fields": [], "signature_zones": []})
+                fields_map = cfg.get("fields", []) if isinstance(cfg, dict) else []
+                sig_map    = cfg.get("signature_zones", []) if isinstance(cfg, dict) else []
 
-            b = load_bundle(cid)
-            fields = b.get("fields", {})
-            fields = fields if isinstance(fields, dict) else {}
-            calc = b.get("calc", {})
-            calc = calc if isinstance(calc, dict) else {}
-            status = (b.get("meta", {}) or {}).get("status", "empty")
+                b = load_bundle(cid)
+                fields = b.get("fields", {})
+                fields = fields if isinstance(fields, dict) else {}
+                calc = b.get("calc", {})
+                calc = calc if isinstance(calc, dict) else {}
+                status = (b.get("meta", {}) or {}).get("status", "empty")
 
-            sigs = signature_state(cid)
+                sigs = signature_state(cid)
 
-            pages = sorted(glob.glob(os.path.join(ASSETS, "page_*.png")))
-            sections = []
-            for idx, p in enumerate(pages, start=1):
-                img = os.path.basename(p)
-                dim = png_size(p)
-                if not dim:
-                    continue
-                iw, ih = dim
-                overlay = []
-
-                for fm in fields_map:
-                    if int(fm.get("page", 0)) != idx:
+                pages = sorted(glob.glob(os.path.join(ASSETS, "page_*.png")))
+                sections = []
+                for idx, p in enumerate(pages, start=1):
+                    img = os.path.basename(p)
+                    dim = png_size(p)
+                    if not dim:
                         continue
-                    name = fm["name"]
-                    kind = fm.get("kind", "text")
-                    readonly = bool(fm.get("readonly", False))
+                    iw, ih = dim
+                    overlay = []
 
-                    val = deep_get(fields, name) or ""
-                    cval = calc.get(name)
-                    if cval is None:
-                        cval = deep_get(calc, name)
-                    if cval is not None and str(cval) != "":
-                        val = cval
-                        readonly = True
+                    for fm in fields_map:
+                        if int(fm.get("page", 0)) != idx:
+                            continue
+                        name = fm["name"]
+                        kind = fm.get("kind", "text")
+                        readonly = bool(fm.get("readonly", False))
 
-                    x = float(fm["x"]); y = float(fm["y"]); w = float(fm["w"]); h = float(fm["h"])
-                    x_pct = (x / iw) * 100.0
-                    y_pct = (y / ih) * 100.0
-                    w_pct = (w / iw) * 100.0
-                    h_pct = (h / ih) * 100.0
-                    style = f"left:{x_pct:.6f}%;top:{y_pct:.6f}%;width:{w_pct:.6f}%;height:{h_pct:.6f}%;"
+                        val = deep_get(fields, name) or ""
+                        cval = calc.get(name)
+                        if cval is None:
+                            cval = deep_get(calc, name)
+                        if cval is not None and str(cval) != "":
+                            val = cval
+                            readonly = True
 
-                    itype = "text"
-                    checked = ""
-                    if kind == "email":
-                        itype = "email"
-                    elif kind == "date":
-                        itype = "date"
-                    elif kind == "checkbox":
-                        itype = "checkbox"
-                        v = str(val).strip().lower()
-                        if v in ("1","true","on","yes","x","checked"):
-                            checked = " checked"
-                        val = "1"
+                        x = float(fm["x"]); y = float(fm["y"]); w = float(fm["w"]); h = float(fm["h"])
+                        x_pct = (x / iw) * 100.0
+                        y_pct = (y / ih) * 100.0
+                        w_pct = (w / iw) * 100.0
+                        h_pct = (h / ih) * 100.0
+                        style = f"left:{x_pct:.6f}%;top:{y_pct:.6f}%;width:{w_pct:.6f}%;height:{h_pct:.6f}%;"
 
-                    ro = " readonly" if readonly else ""
-                    overlay.append(
-                        f"<div class='field' style='{style}'>"
-                        f"<input name='{esc(name)}' type='{itype}' value='{esc(val)}'{checked}{ro}>"
-                        f"</div>"
-                    )
+                        itype = "text"
+                        checked = ""
+                        if kind == "email":
+                            itype = "email"
+                        elif kind == "date":
+                            itype = "date"
+                        elif kind == "checkbox":
+                            itype = "checkbox"
+                            v = str(val).strip().lower()
+                            if v in ("1","true","on","yes","x","checked"):
+                                checked = " checked"
+                            val = "1"
 
-                for sm in sig_map:
-                    if int(sm.get("page", 0)) != idx:
-                        continue
-                    who = sm.get("who")
-                    label = sm.get("label", "Signature")
-                    x = float(sm["x"]); y = float(sm["y"]); w = float(sm["w"]); h = float(sm["h"])
-                    x_pct = (x / iw) * 100.0
-                    y_pct = (y / ih) * 100.0
-                    w_pct = (w / iw) * 100.0
-                    h_pct = (h / ih) * 100.0
-                    style = f"left:{x_pct:.6f}%;top:{y_pct:.6f}%;width:{w_pct:.6f}%;height:{h_pct:.6f}%;"
-
-                    signed = bool(sigs.get(who))
-                    if signed:
-                        rec = sigs.get(who) or {}
-                        if rec.get("mode") == "text":
-                            t = esc(rec.get("sig_text") or "")
-                            ini = esc(rec.get("initials") or "")
-                            overlay.append(
-                                f"<div class='sigzone' style='{style};border-style:solid'>"
-                                f"<div style='width:100%;height:100%;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;padding:8px 10px;background:rgba(255,255,255,.55)'>"
-                                f"<div style='font-family:cursive;font-size:22px;line-height:1'>{t}</div>"
-                                f"<div style='font-size:12px;font-weight:900;opacity:.8'>{ini}</div>"
-                                f"</div></div>"
-                            )
-                        else:
-                            v = urllib.parse.quote(str(rec.get("saved_at","")))
-                            overlay.append(
-                                f"<div class='sigzone' style='{style}'>"
-                                f"<img src='/contract/signature_image?id={urllib.parse.quote(cid)}&who={urllib.parse.quote(who)}&v={v}' alt='Signature'>"
-                                f"</div>"
-                            )
-                    else:
+                        ro = " readonly" if readonly else ""
                         overlay.append(
-                            f"<div class='sigzone' style='{style}'>"
-                            f"<div class='lock'>"
-                            f"<div>{esc(label)}</div>"
-                            f"<div class='small'>Zone verrouillée — envoyer pour signature</div>"
-                            f"<a class='btn secondary' href='/contract/send?id={urllib.parse.quote(cid)}'>Envoyer</a>"
-                            f"</div></div>"
+                            f"<div class='field' style='{style}'>"
+                            f"<input name='{esc(name)}' type='{itype}' value='{esc(val)}'{checked}{ro}>"
+                            f"</div>"
                         )
 
-                sections.append(
-                    f"<section class='page'>"
-                    f"<img class='bg' src='/assets/{esc(img)}' alt='Page {idx}'>"
-                    f"<div class='overlay'>{''.join(overlay)}</div>"
-                    f"</section>"
+                    for sm in sig_map:
+                        if int(sm.get("page", 0)) != idx:
+                            continue
+                        who = sm.get("who")
+                        label = sm.get("label", "Signature")
+                        x = float(sm["x"]); y = float(sm["y"]); w = float(sm["w"]); h = float(sm["h"])
+                        x_pct = (x / iw) * 100.0
+                        y_pct = (y / ih) * 100.0
+                        w_pct = (w / iw) * 100.0
+                        h_pct = (h / ih) * 100.0
+                        style = f"left:{x_pct:.6f}%;top:{y_pct:.6f}%;width:{w_pct:.6f}%;height:{h_pct:.6f}%;"
+
+                        signed = bool(sigs.get(who))
+                        if signed:
+                            rec = sigs.get(who) or {}
+                            if rec.get("mode") == "text":
+                                t = esc(rec.get("sig_text") or "")
+                                ini = esc(rec.get("initials") or "")
+                                overlay.append(
+                                    f"<div class='sigzone' style='{style};border-style:solid'>"
+                                    f"<div style='width:100%;height:100%;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;padding:8px 10px;background:rgba(255,255,255,.55)'>"
+                                    f"<div style='font-family:cursive;font-size:22px;line-height:1'>{t}</div>"
+                                    f"<div style='font-size:12px;font-weight:900;opacity:.8'>{ini}</div>"
+                                    f"</div></div>"
+                                )
+                            else:
+                                v = urllib.parse.quote(str(rec.get("saved_at","")))
+                                overlay.append(
+                                    f"<div class='sigzone' style='{style}'>"
+                                    f"<img src='/contract/signature_image?id={urllib.parse.quote(cid)}&who={urllib.parse.quote(who)}&v={v}' alt='Signature'>"
+                                    f"</div>"
+                                )
+                        else:
+                            overlay.append(
+                                f"<div class='sigzone' style='{style}'>"
+                                f"<div class='lock'>"
+                                f"<div>{esc(label)}</div>"
+                                f"<div class='small'>Zone verrouillée — envoyer pour signature</div>"
+                                f"<a class='btn secondary' href='/contract/send?id={urllib.parse.quote(cid)}'>Envoyer</a>"
+                                f"</div></div>"
+                            )
+
+                    sections.append(
+                        f"<section class='page'>"
+                        f"<img class='bg' src='/assets/{esc(img)}' alt='Page {idx}'>"
+                        f"<div class='overlay'>{''.join(overlay)}</div>"
+                        f"</section>"
+                    )
+
+                topbar = (
+                    f"<div class='topbar'>"
+                    f"<div class='brand'>9999 — Contrat</div>"
+                    f"<div class='pill'>Statut: <b id='status'>{esc(status)}</b></div>"
+                    f"<input type='hidden' name='contract_id' value='{esc(cid)}'>"
+                    f"<button class='btn' type='submit'>Sauvegarder &amp; Calculer</button>"
+                    f"<a class='btn secondary' href='/contract/send?id={urllib.parse.quote(cid)}'>Envoyer</a>"
+                    f"<a class='btn secondary' href='#' onclick='window.print();return false;'>Imprimer</a>"
+                    f"<a class='btn secondary' href='/assets/contract_template.pdf' download>PDF original</a>"
+                    f"<span class='hint'>Mapper: /mapper?page=1</span>"
+                    f"</div>"
                 )
 
-            topbar = (
-                f"<div class='topbar'>"
-                f"<div class='brand'>9999 — Contrat</div>"
-                f"<div class='pill'>Statut: <b id='status'>{esc(status)}</b></div>"
-                f"<input type='hidden' name='contract_id' value='{esc(cid)}'>"
-                f"<button class='btn' type='submit'>Sauvegarder &amp; Calculer</button>"
-                f"<a class='btn secondary' href='/contract/send?id={urllib.parse.quote(cid)}'>Envoyer</a>"
-                f"<a class='btn secondary' href='#' onclick='window.print();return false;'>Imprimer</a>"
-                f"<a class='btn secondary' href='/assets/contract_template.pdf' download>PDF original</a>"
-                f"<span class='hint'>Mapper: /mapper?page=1</span>"
-                f"</div>"
-            )
+                tpl = read_text(os.path.join(WWW, "contract.html"))
+                html = tpl.replace("<!--TOPBAR-->", topbar).replace("<!--PAGES-->", "".join(sections))
+                return self.send_html(html)
 
-            tpl = read_text(os.path.join(WWW, "contract.html"))
-            html = tpl.replace("<!--TOPBAR-->", topbar).replace("<!--PAGES-->", "".join(sections))
-            return self.send_html(html)
+            # ---- signature image (public)
+            if path == "/contract/signature_image":
+                cid = (q.get("id", [""])[0] or "").strip()
+                who = (q.get("who", [""])[0] or "").strip()
+                if not cid or who not in ("client", "rep"):
+                    return self.send_text("bad request", 400)
+                sigs = signature_state(cid)
+                rec = sigs.get(who) or {}
+                png_path = rec.get("png_path")
+                if not png_path or not os.path.exists(png_path):
+                    return self.send_text("not found", 404)
+                return self.serve_file(png_path, "image/png")
 
-        # ---- signature image (public)
-        if path == "/contract/signature_image":
-            cid = q.get("id", [""])[0]
-            who = q.get("who", [""])[0]
-            if not cid or who not in ("client", "rep"):
-                return self.send_text("bad request", 400)
-            sigs = signature_state(cid)
-            rec = sigs.get(who) or {}
-            png_path = rec.get("png_path")
-            if not png_path or not os.path.exists(png_path):
-                return self.send_text("not found", 404)
-            return self.serve_file(png_path, "image/png")
+            # ---- sign flow (public)
+            if path == "/sign":
+                token = (q.get("token", [""])[0] or "").strip()
+                if not token:
+                    return self.send_text("missing token", 400)
+                tp, all_tokens, rec = token_lookup(token)
+                if not rec:
+                    return self.send_text("token invalid", 404)
+                if rec.get("used"):
+                    return self.send_text("Lien déjà utilisé.", 200)
 
-        # ---- sign flow (public)
-        if path == "/sign":
-            token = q.get("token", [""])[0]
-            if not token:
-                return self.send_text("missing token", 400)
-            tp, all_tokens, rec = token_lookup(token)
-            if not rec:
-                return self.send_text("token invalid", 404)
-            if rec.get("used"):
-                return self.send_text("Lien déjà utilisé.", 200)
+                cid = rec["contract_id"]
+                who = rec["who"]
+                label = "Client" if who == "client" else "Représentant"
 
-            cid = rec["contract_id"]
-            who = rec["who"]
-            label = "Client" if who == "client" else "Représentant"
+                cfg = read_json(CFG_PX, {"signature_zones": []})
+                sig_map = cfg.get("signature_zones", []) if isinstance(cfg, dict) else []
+                zones = [z for z in sig_map if z.get("who") == who]
 
-            cfg = read_json(CFG_PX, {"signature_zones": []})
-            sig_map = cfg.get("signature_zones", []) if isinstance(cfg, dict) else []
-            zones = [z for z in sig_map if z.get("who") == who]
+                tpl = read_text(os.path.join(WWW, "sign_flow.html"))
+                payload = json.dumps({
+                    "token": token,
+                    "contract_id": cid,
+                    "who": who,
+                    "label": label,
+                    "zones": zones,
+                }, ensure_ascii=False)
+                return self.send_html(tpl.replace("<!--PAYLOAD-->", esc(payload)))
 
-            tpl = read_text(os.path.join(WWW, "sign_flow.html"))
-            payload = json.dumps({
-                "token": token,
-                "contract_id": cid,
-                "who": who,
-                "label": label,
-                "zones": zones,
-            }, ensure_ascii=False)
-            return self.send_html(tpl.replace("<!--PAYLOAD-->", esc(payload)))
-
-        if path == "/sign/done":
-            cid = q.get("cid", [""])[0]
-            if not cid:
-                return self.send_text("missing cid", 400)
-            html = f"""<!doctype html><html lang='fr'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Merci</title>
+            if path == "/sign/done":
+                cid = (q.get("cid", [""])[0] or "").strip()
+                if not cid:
+                    return self.send_text("missing cid", 400)
+                meta = (load_bundle(cid).get("meta") or {})
+                status = meta.get("status", "")
+                html = f"""<!doctype html><html lang='fr'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Merci</title>
 <style>
 body{{margin:0;font-family:system-ui;background:#0b0f19;color:#e5e7eb}}
 .wrap{{max-width:840px;margin:40px auto;padding:0 16px}}
 .card{{background:rgba(15,23,42,.65);border:1px solid rgba(255,255,255,.12);border-radius:18px;padding:18px}}
 .btn{{display:inline-block;margin-top:14px;border:1px solid rgba(255,255,255,.12);border-radius:14px;padding:10px 14px;background:#f5c542;color:#111;font-weight:900;text-decoration:none}}
 .btn.secondary{{background:rgba(15,23,42,.85);color:#e5e7eb}}
+.small{{opacity:.85}}
 </style></head><body>
 <div class='wrap'>
   <div class='card'>
     <h2 style='margin:0 0 8px 0'>Signature enregistrée ✅</h2>
-    <p style='margin:0 0 10px 0'>Vous pouvez maintenant télécharger une version PDF (via impression) du contrat signé.</p>
+    <div class='small'>Statut actuel: <b>{esc(status)}</b></div>
+    <p style='margin:10px 0'>Vous pouvez télécharger une version PDF (via impression) du contrat signé.</p>
     <a class='btn' href='/contract/print?id={urllib.parse.quote(cid)}' target='_blank'>Télécharger PDF (imprimer)</a>
     <a class='btn secondary' href='/contract?id={urllib.parse.quote(cid)}' target='_blank'>Voir le contrat</a>
   </div>
 </div>
 </body></html>"""
-            return self.send_html(html)
+                return self.send_html(html)
 
-        return self.send_text("Not found", 404)
+            return self.send_text("Not found", 404)
 
+        except Exception as e:
+            # Prevent Render 502 by always returning a response
+            return self.send_text(f"Server error: {e}", 500)
+
+    # --------
+    # POST
+    # --------
     def do_POST(self):
-        u = urllib.parse.urlparse(self.path)
-        path = u.path
+        try:
+            u = urllib.parse.urlparse(self.path)
+            path = u.path
 
-        # POST alias for UI mismatch
-        if path == "/contracts/save":    path = "/contract/save"
-        if path == "/contracts/compute": path = "/contract/compute"
-        if path == "/contracts/send":    path = "/contract/send"
+            # POST alias for UI mismatch
+            if path == "/contracts/save":    path = "/contract/save"
+            if path == "/contracts/compute": path = "/contract/compute"
+            if path == "/contracts/send":    path = "/contract/send"
 
-        length = int(self.headers.get("Content-Length", "0") or "0")
-        raw = self.rfile.read(length) if length else b""
-        form = urllib.parse.parse_qs(raw.decode("utf-8"), keep_blank_values=True)
-        form = {k: (v[0] if isinstance(v, list) and v else "") for k, v in form.items()}
+            length = int(self.headers.get("Content-Length", "0") or "0")
+            raw = self.rfile.read(length) if length else b""
+            form = urllib.parse.parse_qs(raw.decode("utf-8"), keep_blank_values=True)
+            form = {k: (v[0] if isinstance(v, list) and v else "") for k, v in form.items()}
 
-        # LOGIN
-        if path == "/login":
-            username = (form.get("username") or "").strip()
-            password = (form.get("password") or "").strip()
-            s = self.settings()
-            users = s.get("sales_users") or {}
-            urec = users.get(username) if isinstance(users, dict) else None
-            if not (isinstance(urec, dict) and urec.get("password") == password):
-                tpl = read_text(os.path.join(WWW, "login.html"))
-                tpl = tpl.replace("<!--ERROR-->", "Identifiants invalides.")
-                return self.send_html(tpl, 401)
+            # LOGIN
+            if path == "/login":
+                username = (form.get("username") or "").strip()
+                password = (form.get("password") or "").strip()
+                s = self.settings()
+                users = s.get("sales_users") or {}
+                urec = users.get(username) if isinstance(users, dict) else None
+                if not (isinstance(urec, dict) and urec.get("password") == password):
+                    tpl = read_text(os.path.join(WWW, "login.html"))
+                    tpl = tpl.replace("<!--ERROR-->", "Identifiants invalides.")
+                    return self.send_html(tpl, 401)
 
-            sid = "s_" + secrets.token_hex(16)
-            sess = sessions_load()
-            sess[sid] = {"user": username, "created_at": now_iso()}
-            sessions_save(sess)
+                sid = "s_" + secrets.token_hex(16)
+                sess = sessions_load()
+                sess[sid] = {"user": username, "created_at": now_iso()}
+                sessions_save(sess)
 
-            cookie_name = (s.get("auth") or {}).get("cookie_name", "sid")
-            secret = (s.get("auth") or {}).get("session_secret", "CHANGE_ME")
-            cval = make_cookie_value(secret, sid)
+                cookie_name = (s.get("auth") or {}).get("cookie_name", "sid")
+                secret = (s.get("auth") or {}).get("session_secret", "CHANGE_ME")
+                cval = make_cookie_value(secret, sid)
 
-            self.send_response(302)
-            self.send_header("Location", "/sales")
-            self.send_header("Set-Cookie", f"{cookie_name}={cval}; Path=/; HttpOnly; SameSite=Lax")
-            self.end_headers()
-            return
+                self.send_response(302)
+                self.send_header("Location", "/sales")
+                self.send_header("Set-Cookie", f"{cookie_name}={cval}; Path=/; HttpOnly; SameSite=Lax")
+                self.end_headers()
+                return
 
-        # SAVE
-        if path == "/contract/save":
-            cid = (form.get("contract_id") or "").strip()
-            if not cid:
-                return self.send_text("missing contract_id", 400)
-            ensure_contract(cid)
+            # SAVE
+            if path == "/contract/save":
+                cid = (form.get("contract_id") or "").strip()
+                if not cid:
+                    return self.send_text("missing contract_id", 400)
+                ensure_contract(cid)
 
-            b = load_bundle(cid)
-            fields = b.get("fields", {})
-            fields = fields if isinstance(fields, dict) else {}
-
-            for k, v in form.items():
-                if k == "contract_id":
-                    continue
-                deep_set(fields, k, v)
-
-            fields["_meta"] = {"updated_at": now_iso()}
-            b["fields"] = fields
-
-            calc_and_store(cid, fields)
-            set_status(cid, "draft")
-            return self.redirect(f"/contract?id={urllib.parse.quote(cid)}")
-
-        # COMPUTE
-        if path == "/contract/compute":
-            cid = (form.get("contract_id") or "").strip() or None
-
-            fields = {}
-            for k, v in form.items():
-                if k == "contract_id":
-                    continue
-                deep_set(fields, k, v)
-
-            if cid:
                 b = load_bundle(cid)
-                saved = b.get("fields", {})
-                if isinstance(saved, dict):
-                    merged = saved
+                fields = b.get("fields", {})
+                fields = fields if isinstance(fields, dict) else {}
 
-                    def merge_in(dst, src):
-                        for kk, vv in src.items():
-                            if isinstance(vv, dict) and isinstance(dst.get(kk), dict):
-                                merge_in(dst[kk], vv)
-                            else:
-                                dst[kk] = vv
+                for k, v in form.items():
+                    if k == "contract_id":
+                        continue
+                    deep_set(fields, k, v)
 
-                    merge_in(merged, fields)
-                    fields = merged
+                fields["_meta"] = {"updated_at": now_iso()}
+                b["fields"] = fields
 
-            calc = compute_calculations(fields)
+                calc_and_store(cid, fields)
+                set_status(cid, "draft")
+                return self.redirect(f"/contract?id={urllib.parse.quote(cid)}")
 
-            calc["pricing.subtotal"] = calc.get("Prix_de_vente_avant_taxes", "")
-            calc["pricing.tps"] = calc.get("TPS_5_730072220RT0001", "")
-            calc["pricing.tvq"] = calc.get("TVQ_9975_1232208119TQ0001", "")
-            calc["pricing.total_with_tax"] = calc.get("Total_prix_de_vente_avec_taxes", "")
+            # COMPUTE
+            if path == "/contract/compute":
+                cid = (form.get("contract_id") or "").strip() or None
 
-            try:
-                total_with_tax_num = float(calc.get("Total_prix_de_vente_avec_taxes", "0") or 0)
-            except Exception:
-                total_with_tax_num = 0.0
+                fields = {}
+                for k, v in form.items():
+                    if k == "contract_id":
+                        continue
+                    deep_set(fields, k, v)
 
-            calc["payments.no_finance.amount_at_measure"] = money(total_with_tax_num * 0.40)
-            calc["payments.no_finance.amount_pre_delivery"] = money(total_with_tax_num * 0.60)
-            calc["undefined"] = calc["payments.no_finance.amount_at_measure"]
-            calc["undefined_2"] = calc["payments.no_finance.amount_pre_delivery"]
+                if cid:
+                    b = load_bundle(cid)
+                    saved = b.get("fields", {})
+                    if isinstance(saved, dict):
+                        merged = saved
 
-            if cid:
-                b = load_bundle(cid)
-                b["fields"] = fields if isinstance(fields, dict) else {}
-                b["calc"] = calc if isinstance(calc, dict) else {}
-                save_bundle(cid, b)
-                write_json(os.path.join(cdir(cid), "fields.json"), b["fields"])
-                write_json(os.path.join(cdir(cid), "calc.json"), b["calc"])
+                        def merge_in(dst, src):
+                            for kk, vv in src.items():
+                                if isinstance(vv, dict) and isinstance(dst.get(kk), dict):
+                                    merge_in(dst[kk], vv)
+                                else:
+                                    dst[kk] = vv
 
-            payload = json.dumps({"ok": True, "calc": calc}, ensure_ascii=False).encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Content-Length", str(len(payload)))
-            self.end_headers()
-            self.wfile.write(payload)
-            return
+                        merge_in(merged, fields)
+                        fields = merged
 
-        # SEND (creates 2 tokens, logs links, updates status)
-        if path == "/contract/send":
-            cid = (form.get("contract_id") or "").strip()
-            client_email = (form.get("client_email") or "").strip()
-            rep_email = (form.get("rep_email") or "").strip()
-            if not cid or not client_email or not rep_email:
-                return self.send_text("missing", 400)
-            ensure_contract(cid)
+                calc = compute_calculations(fields)
 
-            # creating tokens implies "to_sign"
-            set_status(cid, "to_sign")
+                calc["pricing.subtotal"] = calc.get("Prix_de_vente_avant_taxes", "")
+                calc["pricing.tps"] = calc.get("TPS_5_730072220RT0001", "")
+                calc["pricing.tvq"] = calc.get("TVQ_9975_1232208119TQ0001", "")
+                calc["pricing.total_with_tax"] = calc.get("Total_prix_de_vente_avec_taxes", "")
 
-            t_client = store_token(cid, "client", client_email)
-            t_rep = store_token(cid, "rep", rep_email)
-
-            settings = read_json(SETTINGS_PATH, {})
-            base = base_url(self)
-            link_client = f"{base}/sign?token={t_client}"
-            link_rep = f"{base}/sign?token={t_rep}"
-
-            subject = "Signature requise — Contrat Cuisines 9999"
-            ok1, msg1 = send_email(settings, client_email, subject,
-                f"Bonjour,\n\nVeuillez signer le contrat via ce lien:\n{link_client}\n\nMerci,\nCuisines 9999\n")
-            ok2, msg2 = send_email(settings, rep_email, subject,
-                f"Bonjour,\n\nVeuillez signer (représentant) via ce lien:\n{link_rep}\n\nMerci,\nCuisines 9999\n")
-
-            write_json(os.path.join(cdir(cid), "email_log.json"), {
-                "sent_at": now_iso(),
-                "client_email": client_email, "rep_email": rep_email,
-                "client_link": link_client, "rep_link": link_rep,
-                "smtp_client": {"ok": ok1, "msg": msg1},
-                "smtp_rep": {"ok": ok2, "msg": msg2},
-            })
-
-            return self.redirect(f"/contract?id={urllib.parse.quote(cid)}")
-
-        # SIGN SUBMIT (public)
-        if path == "/sign/submit":
-            token = (form.get("token") or "").strip()
-            mode = (form.get("mode") or "draw").strip()
-            png_b64 = (form.get("png_b64") or "").strip()
-            sig_text = (form.get("sig_text") or "").strip()
-            initials = (form.get("initials") or "").strip()
-            applied = (form.get("applied") or "").strip()
-            if not token:
-                return self.send_text("missing token", 400)
-
-            tp, all_tokens, rec = token_lookup(token)
-            if not rec:
-                return self.send_text("token invalid", 404)
-            if rec.get("used"):
-                return self.send_text("Lien déjà utilisé.", 200)
-
-            cid = rec["contract_id"]
-            who = rec["who"]
-            ensure_contract(cid)
-
-            png_path = None
-            if mode == "draw":
-                prefix = "data:image/png;base64,"
-                if not png_b64.startswith(prefix):
-                    return self.send_text("bad image", 400)
                 try:
-                    sig_raw = base64.b64decode(png_b64[len(prefix):])
+                    total_with_tax_num = float(calc.get("Total_prix_de_vente_avec_taxes", "0") or 0)
                 except Exception:
-                    return self.send_text("bad image", 400)
-                if len(sig_raw) < 80:
-                    return self.send_text("empty signature", 400)
-                sig_dir = os.path.join(cdir(cid), "sig")
-                os.makedirs(sig_dir, exist_ok=True)
-                png_path = os.path.join(sig_dir, f"{who}.png")
-                with open(png_path, "wb") as f:
-                    f.write(sig_raw)
-            else:
-                if not sig_text:
-                    return self.send_text("missing signature text", 400)
+                    total_with_tax_num = 0.0
 
-            sigs = signature_state(cid)
-            sigs[who] = {
-                "who": who,
-                "saved_at": now_iso(),
-                "png_path": png_path,
-                "mode": mode,
-                "sig_text": sig_text,
-                "initials": initials,
-                "applied": [a for a in applied.split(",") if a.strip()],
-                "ip": self.client_address[0] if self.client_address else "",
-                "ua": self.headers.get("User-Agent", ""),
-                "email": rec.get("email", "")
-            }
-            write_json(os.path.join(cdir(cid), "signatures.json"), sigs)
+                calc["payments.no_finance.amount_at_measure"] = money(total_with_tax_num * 0.40)
+                calc["payments.no_finance.amount_pre_delivery"] = money(total_with_tax_num * 0.60)
+                calc["undefined"] = calc["payments.no_finance.amount_at_measure"]
+                calc["undefined_2"] = calc["payments.no_finance.amount_pre_delivery"]
 
-            all_tokens[token]["used"] = True
-            all_tokens[token]["used_at"] = now_iso()
-            write_json(tp, all_tokens)
+                if cid:
+                    b = load_bundle(cid)
+                    b["fields"] = fields if isinstance(fields, dict) else {}
+                    b["calc"] = calc if isinstance(calc, dict) else {}
+                    save_bundle(cid, b)
+                    write_json(os.path.join(cdir(cid), "fields.json"), b["fields"])
+                    write_json(os.path.join(cdir(cid), "calc.json"), b["calc"])
 
-            # updates status to signed_client / signed_rep / signed
-            mark_signed_if_complete(cid)
+                payload = json.dumps({"ok": True, "calc": calc}, ensure_ascii=False).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+                return
 
-            return self.redirect(f"/sign/done?cid={urllib.parse.quote(cid)}")
+            # SEND (manual): creates 2 tokens, logs links, shows copy page
+            if path == "/contract/send":
+                cid = (form.get("contract_id") or "").strip()
+                client_email = (form.get("client_email") or "").strip()
+                rep_email = (form.get("rep_email") or "").strip()
+                if not cid or not client_email or not rep_email:
+                    return self.send_text("missing contract_id/client_email/rep_email", 400)
+                ensure_contract(cid)
 
-        return self.send_text("Not found", 404)
+                # creating tokens implies "to_sign"
+                set_status(cid, "to_sign")
+
+                t_client = store_token(cid, "client", client_email)
+                t_rep = store_token(cid, "rep", rep_email)
+
+                base = base_url(self)
+                link_client = f"{base}/sign?token={t_client}"
+                link_rep = f"{base}/sign?token={t_rep}"
+
+                write_json(os.path.join(cdir(cid), "email_log.json"), {
+                    "generated_at": now_iso(),
+                    "client_email": client_email,
+                    "rep_email": rep_email,
+                    "client_link": link_client,
+                    "rep_link": link_rep,
+                    "note": "Manual send (no SMTP on Render)",
+                })
+
+                # Show links immediately (no redirect, no mystery)
+                html = f"""<!doctype html><html lang="fr"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Liens de signature</title>
+<style>
+body{{margin:0;font-family:system-ui;background:#0b0f19;color:#e5e7eb}}
+.wrap{{max-width:900px;margin:40px auto;padding:0 16px}}
+.card{{background:rgba(15,23,42,.70);border:1px solid rgba(255,255,255,.12);border-radius:18px;padding:18px}}
+h2{{margin:0 0 10px 0}}
+.p{{opacity:.9;line-height:1.4}}
+.row{{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin:12px 0}}
+.label{{font-weight:900;min-width:140px}}
+.input{{flex:1;min-width:260px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.14);color:#e5e7eb;
+padding:10px 12px;border-radius:12px;font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace}}
+.btn{{appearance:none;border:1px solid rgba(255,255,255,.14);background:#f5c542;color:#111;
+padding:10px 12px;border-radius:12px;cursor:pointer;font-weight:900;text-decoration:none}}
+.btn.secondary{{background:rgba(255,255,255,.06);color:#e5e7eb}}
+.small{{font-size:12px;opacity:.8}}
+hr{{border:none;border-top:1px solid rgba(255,255,255,.12);margin:14px 0}}
+</style>
+</head><body>
+<div class="wrap">
+  <div class="card">
+    <h2>Liens générés ✅</h2>
+    <div class="p">Copiez/collez ces liens dans Proton (ou SMS). Envoi manuel (Render sans SMTP).</div>
+    <div class="small">Contrat: <b>{esc(cid)}</b> — Statut: <b>to_sign</b></div>
+    <hr>
+
+    <div class="row">
+      <div class="label">Client</div>
+      <input class="input" id="l1" value="{esc(link_client)}" readonly>
+      <button class="btn" onclick="copy('l1')">Copier</button>
+      <a class="btn secondary" href="{esc(link_client)}" target="_blank">Ouvrir</a>
+    </div>
+
+    <div class="row">
+      <div class="label">Représentant</div>
+      <input class="input" id="l2" value="{esc(link_rep)}" readonly>
+      <button class="btn" onclick="copy('l2')">Copier</button>
+      <a class="btn secondary" href="{esc(link_rep)}" target="_blank">Ouvrir</a>
+    </div>
+
+    <hr>
+    <a class="btn secondary" href="/contract?id={urllib.parse.quote(cid)}">Retour au contrat</a>
+    <a class="btn secondary" href="/contract/print?id={urllib.parse.quote(cid)}" target="_blank">Voir PDF (imprimer)</a>
+  </div>
+</div>
+
+<script>
+function copy(id){{
+  const el = document.getElementById(id);
+  if(!el) return;
+  el.focus(); el.select();
+  try{{ document.execCommand('copy'); }}catch(e){{}}
+}}
+</script>
+</body></html>"""
+                return self.send_html(html)
+
+            # SIGN SUBMIT (public)
+            if path == "/sign/submit":
+                token = (form.get("token") or "").strip()
+                mode = (form.get("mode") or "draw").strip()
+                png_b64 = (form.get("png_b64") or "").strip()
+                sig_text = (form.get("sig_text") or "").strip()
+                initials = (form.get("initials") or "").strip()
+                applied = (form.get("applied") or "").strip()
+                if not token:
+                    return self.send_text("missing token", 400)
+
+                tp, all_tokens, rec = token_lookup(token)
+                if not rec:
+                    return self.send_text("token invalid", 404)
+                if rec.get("used"):
+                    return self.send_text("Lien déjà utilisé.", 200)
+
+                cid = rec["contract_id"]
+                who = rec["who"]
+                ensure_contract(cid)
+
+                png_path = None
+                if mode == "draw":
+                    prefix = "data:image/png;base64,"
+                    if not png_b64.startswith(prefix):
+                        return self.send_text("bad image", 400)
+                    try:
+                        sig_raw = base64.b64decode(png_b64[len(prefix):])
+                    except Exception:
+                        return self.send_text("bad image", 400)
+                    if len(sig_raw) < 80:
+                        return self.send_text("empty signature", 400)
+                    sig_dir = os.path.join(cdir(cid), "sig")
+                    os.makedirs(sig_dir, exist_ok=True)
+                    png_path = os.path.join(sig_dir, f"{who}.png")
+                    with open(png_path, "wb") as f:
+                        f.write(sig_raw)
+                else:
+                    if not sig_text:
+                        return self.send_text("missing signature text", 400)
+
+                sigs = signature_state(cid)
+                sigs[who] = {
+                    "who": who,
+                    "saved_at": now_iso(),
+                    "png_path": png_path,
+                    "mode": mode,
+                    "sig_text": sig_text,
+                    "initials": initials,
+                    "applied": [a for a in applied.split(",") if a.strip()],
+                    "ip": self.client_address[0] if self.client_address else "",
+                    "ua": self.headers.get("User-Agent", ""),
+                    "email": rec.get("email", "")
+                }
+                write_json(os.path.join(cdir(cid), "signatures.json"), sigs)
+
+                all_tokens[token]["used"] = True
+                all_tokens[token]["used_at"] = now_iso()
+                write_json(tp, all_tokens)
+
+                # updates status to signed_client / signed_rep / signed
+                mark_signed_if_complete(cid)
+
+                return self.redirect(f"/sign/done?cid={urllib.parse.quote(cid)}")
+
+            return self.send_text("Not found", 404)
+
+        except Exception as e:
+            return self.send_text(f"Server error: {e}", 500)
 
     # -------------
     # Response helpers
