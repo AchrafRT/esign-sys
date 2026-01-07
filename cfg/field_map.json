@@ -1,0 +1,180 @@
+{
+  "fields": [
+    {
+      "name": "contract.date",
+      "label": "Date",
+      "kind": "date",
+      "page": 1,
+      "x_pct": 10.6209,
+      "y_pct": 8.5859,
+      "w_pct": 19.6078,
+      "h_pct": 1.7677,
+      "readonly": false,
+      "placeholder": ""
+    },
+    {
+      "name": "contract.quote_number",
+      "label": "# Devis",
+      "kind": "text",
+      "page": 1,
+      "x_pct": 37.5817,
+      "y_pct": 8.5859,
+      "w_pct": 22.8758,
+      "h_pct": 1.7677,
+      "readonly": false,
+      "placeholder": ""
+    },
+    {
+      "name": "client.first_name",
+      "label": "Prénom",
+      "kind": "text",
+      "page": 1,
+      "x_pct": 11.4379,
+      "y_pct": 17.4242,
+      "w_pct": 22.8758,
+      "h_pct": 1.7677,
+      "readonly": false,
+      "placeholder": ""
+    },
+    {
+      "name": "client.last_name",
+      "label": "Nom",
+      "kind": "text",
+      "page": 1,
+      "x_pct": 35.9477,
+      "y_pct": 17.4242,
+      "w_pct": 26.1438,
+      "h_pct": 1.7677,
+      "readonly": false,
+      "placeholder": ""
+    },
+    {
+      "name": "client.email",
+      "label": "Courriel",
+      "kind": "email",
+      "page": 1,
+      "x_pct": 11.4379,
+      "y_pct": 20.5808,
+      "w_pct": 42.4837,
+      "h_pct": 1.7677,
+      "readonly": false,
+      "placeholder": ""
+    },
+    {
+      "name": "client.phone_main",
+      "label": "Téléphone",
+      "kind": "text",
+      "page": 1,
+      "x_pct": 11.4379,
+      "y_pct": 23.1061,
+      "w_pct": 32.6797,
+      "h_pct": 1.7677,
+      "readonly": false,
+      "placeholder": ""
+    },
+    {
+      "name": "client.address",
+      "label": "Adresse",
+      "kind": "text",
+      "page": 1,
+      "x_pct": 11.4379,
+      "y_pct": 26.2626,
+      "w_pct": 52.2876,
+      "h_pct": 1.7677,
+      "readonly": false,
+      "placeholder": ""
+    },
+    {
+      "name": "pricing.subtotal",
+      "label": "Sous-total",
+      "kind": "text",
+      "page": 2,
+      "x_pct": 65.3595,
+      "y_pct": 14.899,
+      "w_pct": 22.8758,
+      "h_pct": 1.7677,
+      "readonly": false,
+      "placeholder": ""
+    },
+    {
+      "name": "pricing.tps",
+      "label": "TPS",
+      "kind": "text",
+      "page": 2,
+      "x_pct": 65.3595,
+      "y_pct": 17.4242,
+      "w_pct": 22.8758,
+      "h_pct": 1.7677,
+      "readonly": true,
+      "placeholder": "auto"
+    },
+    {
+      "name": "pricing.tvq",
+      "label": "TVQ",
+      "kind": "text",
+      "page": 2,
+      "x_pct": 65.3595,
+      "y_pct": 19.9495,
+      "w_pct": 22.8758,
+      "h_pct": 1.7677,
+      "readonly": true,
+      "placeholder": "auto"
+    },
+    {
+      "name": "pricing.total_with_tax",
+      "label": "Total",
+      "kind": "text",
+      "page": 2,
+      "x_pct": 65.3595,
+      "y_pct": 22.4747,
+      "w_pct": 22.8758,
+      "h_pct": 1.7677,
+      "readonly": true,
+      "placeholder": "auto"
+    },
+    {
+      "name": "payments.no_finance.amount_at_measure",
+      "label": "40% à la mesure",
+      "kind": "text",
+      "page": 2,
+      "x_pct": 43.3007,
+      "y_pct": 32.5758,
+      "w_pct": 26.1438,
+      "h_pct": 1.7677,
+      "readonly": true,
+      "placeholder": "auto"
+    },
+    {
+      "name": "payments.no_finance.amount_pre_delivery",
+      "label": "60% avant livraison",
+      "kind": "text",
+      "page": 2,
+      "x_pct": 43.3007,
+      "y_pct": 35.101,
+      "w_pct": 26.1438,
+      "h_pct": 1.7677,
+      "readonly": true,
+      "placeholder": "auto"
+    }
+  ],
+  "signature_zones": [
+    {
+      "who": "client",
+      "label": "Signature du client",
+      "page": 4,
+      "x": 51.470588235294116,
+      "y": 24.873737373737374,
+      "w": 39.21568627450981,
+      "h": 6.944444444444445
+    },
+    {
+      "who": "rep",
+      "label": "Signature du représentant",
+      "page": 4,
+      "x": 51.470588235294116,
+      "y": 33.71212121212121,
+      "w": 39.21568627450981,
+      "h": 6.944444444444445
+    }
+  ]
+}

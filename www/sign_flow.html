@@ -1,0 +1,283 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Signature</title>
+<style>
+:root{--bg:#0b0f19;--card:rgba(15,23,42,.65);--stroke:rgba(255,255,255,.12);--ink:#e5e7eb;--muted:rgba(229,231,235,.75);--accent:#f5c542;--ok:#34d399;--r:18px}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial}
+.wrap{max-width:980px;margin:22px auto;padding:0 14px}
+.card{background:var(--card);border:1px solid var(--stroke);border-radius:var(--r);padding:14px}
+.h{display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap;margin-bottom:10px}
+.h b{font-size:18px}
+.step{display:none}
+.step.active{display:block}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.in{padding:10px 12px;border-radius:12px;border:1px solid var(--stroke);background:rgba(15,23,42,.85);color:var(--ink);min-width:240px;flex:1}
+.btn{appearance:none;border:1px solid rgba(255,255,255,.12);background:var(--accent);color:#111;padding:10px 12px;border-radius:12px;font-weight:1000;cursor:pointer}
+.btn.secondary{background:rgba(15,23,42,.85);color:var(--ink)}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.muted{color:var(--muted);font-size:13px}
+.tabs{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}
+.tab{padding:8px 10px;border-radius:999px;border:1px solid var(--stroke);background:rgba(15,23,42,.85);cursor:pointer;font-weight:900;font-size:13px}
+.tab.active{background:#fff;color:#111}
+.canvasWrap{border:1px solid var(--stroke);border-radius:14px;overflow:hidden;background:#fff}
+#sigCanvas{width:100%;height:220px;display:block}
+hr{border:none;border-top:1px solid rgba(255,255,255,.08);margin:14px 0}
+.progress{display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap}
+.pill{display:inline-flex;align-items:center;gap:8px;padding:6px 10px;border:1px solid var(--stroke);border-radius:999px;background:rgba(15,23,42,.85);font-size:13px}
+.pages{display:grid;gap:14px;margin-top:12px}
+.page{position:relative;border:1px solid rgba(255,255,255,.12);border-radius:16px;overflow:hidden;background:#111}
+.page img{width:100%;display:block}
+.zone{position:absolute;border:2px dashed rgba(245,197,66,.85);border-radius:10px;cursor:pointer;display:flex;align-items:center;justify-content:center;background:rgba(245,197,66,.08)}
+.zone.done{border-style:solid;border-color:rgba(52,211,153,.9);background:rgba(52,211,153,.10)}
+.zone .tag{font-size:12px;font-weight:1000;color:rgba(255,255,255,.9);padding:4px 6px;border-radius:999px;background:rgba(0,0,0,.35)}
+.stamp{position:absolute;inset:0;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;padding:8px 10px;color:#111}
+.stamp .sig{font-family:cursive;font-size:22px;line-height:1}
+.stamp .ini{font-weight:1000;font-size:12px;opacity:.75}
+.footer{margin-top:14px;display:flex;gap:10px;flex-wrap:wrap;justify-content:flex-end}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="card">
+    <div class="h">
+      <div>
+        <b id="title">Signature</b>
+        <div class="muted" id="sub">Contrat</div>
+      </div>
+      <div class="pill" id="pill">Étape 1/2</div>
+    </div>
+
+    <div id="step1" class="step active">
+      <div class="muted">Étape 1 — créez votre signature et vos initiales.</div>
+      <div class="tabs">
+        <div class="tab active" data-mode="draw">Dessiner</div>
+        <div class="tab" data-mode="type">Écrire mon nom</div>
+      </div>
+
+      <div id="drawBlock">
+        <div class="canvasWrap"><canvas id="sigCanvas"></canvas></div>
+        <div class="row" style="margin-top:10px">
+          <button class="btn secondary" id="btnClear" type="button">Effacer</button>
+          <span class="muted">Dessinez avec votre souris / doigt.</span>
+        </div>
+      </div>
+
+      <div id="typeBlock" style="display:none">
+        <div class="row">
+          <input class="in" id="sigText" placeholder="Votre nom complet (signature)" />
+        </div>
+        <div class="muted" style="margin-top:6px">Aperçu: style manuscrit.</div>
+      </div>
+
+      <hr>
+      <div class="row">
+        <input class="in" id="initials" placeholder="Vos initiales (ex: SA)" />
+        <button class="btn" id="toStep2" type="button">Continuer</button>
+      </div>
+      <div class="muted" style="margin-top:6px">Vous devrez ensuite cliquer sur chaque zone de signature.</div>
+    </div>
+
+    <div id="step2" class="step">
+      <div class="progress">
+        <div class="muted">Étape 2 — cliquez chaque zone <b>Signature/Initiales</b> sur le contrat.</div>
+        <div class="pill"><span id="doneN">0</span>/<span id="totalN">0</span> zones</div>
+      </div>
+      <div class="pages" id="pages"></div>
+
+      <div class="footer">
+        <button class="btn secondary" id="back" type="button">Retour</button>
+        <button class="btn" id="approve" type="button" disabled>Approuver</button>
+      </div>
+    </div>
+
+    <form id="submit" method="POST" action="/sign/submit" style="display:none">
+      <input name="token" id="f_token" />
+      <input name="mode" id="f_mode" />
+      <input name="png_b64" id="f_png" />
+      <input name="sig_text" id="f_text" />
+      <input name="initials" id="f_init" />
+      <input name="applied" id="f_applied" />
+    </form>
+  </div>
+</div>
+
+<script>
+const payload = JSON.parse(document.querySelector('#payload').textContent);
+document.getElementById('title').textContent = payload.label + ' — Signature';
+document.getElementById('sub').textContent = 'Contrat: ' + payload.contract_id;
+document.getElementById('f_token').value = payload.token;
+
+let mode = 'draw';
+let applied = new Set();
+let sigDataUrl = '';
+let sigText = '';
+
+const tabs = Array.from(document.querySelectorAll('.tab'));
+tabs.forEach(t=>{
+  t.addEventListener('click', ()=>{
+    tabs.forEach(x=>x.classList.remove('active'));
+    t.classList.add('active');
+    mode = t.dataset.mode;
+    document.getElementById('drawBlock').style.display = (mode==='draw') ? '' : 'none';
+    document.getElementById('typeBlock').style.display = (mode==='type') ? '' : 'none';
+  });
+});
+
+// Canvas signature
+const canvas = document.getElementById('sigCanvas');
+const ctx = canvas.getContext('2d');
+function resizeCanvas(){
+  const rect = canvas.parentElement.getBoundingClientRect();
+  canvas.width = Math.max(320, Math.floor(rect.width));
+  canvas.height = 220;
+  ctx.lineWidth = 3;
+  ctx.lineCap = 'round';
+  ctx.strokeStyle = '#0b0f19';
+  // keep existing strokes? skip; user can redraw after resize
+}
+resizeCanvas();
+window.addEventListener('resize', resizeCanvas);
+
+let drawing = false;
+function pos(e){
+  const r = canvas.getBoundingClientRect();
+  const x = (e.touches?e.touches[0].clientX:e.clientX) - r.left;
+  const y = (e.touches?e.touches[0].clientY:e.clientY) - r.top;
+  return {x,y};
+}
+function start(e){ drawing = true; const p = pos(e); ctx.beginPath(); ctx.moveTo(p.x,p.y); e.preventDefault(); }
+function move(e){ if(!drawing) return; const p = pos(e); ctx.lineTo(p.x,p.y); ctx.stroke(); e.preventDefault(); }
+function end(){ drawing = false; }
+
+canvas.addEventListener('mousedown', start);
+canvas.addEventListener('mousemove', move);
+window.addEventListener('mouseup', end);
+canvas.addEventListener('touchstart', start, {passive:false});
+canvas.addEventListener('touchmove', move, {passive:false});
+window.addEventListener('touchend', end);
+
+document.getElementById('btnClear').addEventListener('click', ()=>{
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+});
+
+function goto(step){
+  document.querySelectorAll('.step').forEach(s=>s.classList.remove('active'));
+  document.getElementById(step).classList.add('active');
+  document.getElementById('pill').textContent = (step==='step1') ? 'Étape 1/2' : 'Étape 2/2';
+}
+
+document.getElementById('toStep2').addEventListener('click', async ()=>{
+  const ini = document.getElementById('initials').value.trim();
+  if(!ini){ alert('Veuillez entrer vos initiales.'); return; }
+
+  if(mode==='draw'){
+    sigDataUrl = canvas.toDataURL('image/png');
+    // naive check: empty canvas -> small png
+    if(sigDataUrl.length < 4000){ alert('Signature vide. Dessinez votre signature.'); return; }
+  }else{
+    sigText = document.getElementById('sigText').value.trim();
+    if(!sigText){ alert('Veuillez écrire votre nom.'); return; }
+  }
+
+  buildPages();
+  goto('step2');
+});
+
+document.getElementById('back').addEventListener('click', ()=>goto('step1'));
+
+function buildPages(){
+  const pagesEl = document.getElementById('pages');
+  pagesEl.innerHTML = '';
+  applied = new Set();
+
+  const zones = payload.zones || [];
+  document.getElementById('totalN').textContent = zones.length;
+  document.getElementById('doneN').textContent = '0';
+  document.getElementById('approve').disabled = true;
+
+  // group zones by page
+  const byPage = {};
+  zones.forEach((z, idx)=>{
+    const p = Number(z.page || 1);
+    byPage[p] = byPage[p] || [];
+    byPage[p].push({z, idx});
+  });
+
+  const pageNos = Object.keys(byPage).map(Number).sort((a,b)=>a-b);
+  for(const p of pageNos){
+    const page = document.createElement('div');
+    page.className = 'page';
+    const img = document.createElement('img');
+    img.src = '/assets/page_' + String(p).padStart(2,'0') + '.png';
+    img.alt = 'Page ' + p;
+    page.appendChild(img);
+
+    img.addEventListener('load', ()=>{
+      const iw = img.naturalWidth, ih = img.naturalHeight;
+      for(const {z, idx} of byPage[p]){
+        const zone = document.createElement('div');
+        zone.className = 'zone';
+        zone.dataset.idx = String(idx);
+        const x = Number(z.x||0), y = Number(z.y||0), w = Number(z.w||0), h = Number(z.h||0);
+        zone.style.left = (x/iw*100) + '%';
+        zone.style.top = (y/ih*100) + '%';
+        zone.style.width = (w/iw*100) + '%';
+        zone.style.height = (h/ih*100) + '%';
+        zone.innerHTML = '<div class="tag">' + (z.label||'Signature') + '</div>';
+
+        zone.addEventListener('click', ()=>{
+          if(applied.has(idx)) return;
+          applied.add(idx);
+          zone.classList.add('done');
+          // stamp
+          const stamp = document.createElement('div');
+          stamp.className = 'stamp';
+          if(mode==='draw'){
+            stamp.innerHTML = '<img src="' + sigDataUrl + '" style="max-width:100%;max-height:100%;object-fit:contain" />';
+          }else{
+            const ini = document.getElementById('initials').value.trim();
+            stamp.innerHTML = '<div class="sig">' + escapeHtml(sigText) + '</div><div class="ini">' + escapeHtml(ini) + '</div>';
+          }
+          zone.appendChild(stamp);
+
+          document.getElementById('doneN').textContent = String(applied.size);
+          if(applied.size === zones.length){
+            document.getElementById('approve').disabled = false;
+          }
+        });
+
+        page.appendChild(zone);
+      }
+    });
+
+    pagesEl.appendChild(page);
+  }
+}
+
+function escapeHtml(s){
+  return String(s||'').replace(/[&<>'"]/g, c=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+}
+
+document.getElementById('approve').addEventListener('click', ()=>{
+  const ini = document.getElementById('initials').value.trim();
+  const zones = payload.zones || [];
+  if(applied.size !== zones.length){
+    alert('Veuillez cliquer toutes les zones avant d\'approuver.');
+    return;
+  }
+  document.getElementById('f_mode').value = mode;
+  document.getElementById('f_png').value = (mode==='draw') ? sigDataUrl : '';
+  document.getElementById('f_text').value = (mode==='type') ? sigText : '';
+  document.getElementById('f_init').value = ini;
+  document.getElementById('f_applied').value = Array.from(applied).join(',');
+  document.getElementById('submit').submit();
+});
+</script>
+
+<script id="payload" type="application/json"><!--PAYLOAD--></script>
+</body>
+</html>

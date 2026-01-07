@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>9999 — Mapper (Admin)</title>
+  <style>
+    body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;background:#0b0f19;color:#e5e7eb}
+    .top{position:sticky;top:0;background:rgba(17,24,39,.9);backdrop-filter:blur(10px);padding:10px 14px;border-bottom:1px solid rgba(255,255,255,.08);display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+    .pill{padding:6px 10px;border-radius:999px;border:1px solid rgba(255,255,255,.10);background:rgba(15,23,42,.75);font-weight:900;font-size:12px}
+    .btn{border:1px solid rgba(255,255,255,.12);background:#f5c542;color:#111;padding:8px 12px;border-radius:12px;font-weight:900;cursor:pointer}
+    .btn.secondary{background:rgba(15,23,42,.80);color:#e5e7eb}
+    .wrap{max-width:1200px;margin:12px auto 60px;padding:0 12px}
+    .paper{position:relative;margin:0 auto;background:#fff;border-radius:16px;overflow:hidden}
+    .paper img{width:100%;display:block}
+    .cross{position:absolute;pointer-events:none;width:18px;height:18px;border:2px solid rgba(245,197,66,.95);border-radius:50%;transform:translate(-50%,-50%);box-shadow:0 0 0 4px rgba(245,197,66,.20)}
+    .box{position:absolute;pointer-events:none;border:2px dashed rgba(59,130,246,.9);background:rgba(59,130,246,.10)}
+    .note{font-size:12px;opacity:.85;line-height:1.4}
+    code{background:rgba(255,255,255,.08);padding:2px 6px;border-radius:8px}
+    input[type="text"]{width:420px;max-width:90vw;padding:8px 10px;border-radius:12px;border:1px solid rgba(255,255,255,.10);background:rgba(15,23,42,.80);color:#e5e7eb}
+  </style>
+</head>
+<body>
+  <div class="top">
+    <div class="pill">Mapper Admin</div>
+    <div class="pill">Page: <span id="pageno"><!--PAGENO--></span></div>
+    <div class="pill">Image: <span id="imgdim">...</span></div>
+    <button class="btn secondary" id="modePoint">Mode Point</button>
+    <button class="btn secondary" id="modeBox">Mode Box</button>
+    <button class="btn" id="copy">Copier JSON</button>
+    <span class="note">Clique sur le document: récupère <code>x,y</code> en pixels (PNG). Mode Box: clique-dépose pour <code>x,y,w,h</code>.</span>
+  </div>
+
+  <div class="wrap">
+    <div class="paper" id="paper">
+      <img id="bg" src="<!--IMGURL-->" alt="page">
+      <div class="cross" id="cross" style="display:none"></div>
+      <div class="box" id="box" style="display:none"></div>
+    </div>
+
+    <div style="margin-top:12px">
+      <div class="note">Sortie (colle ça dans <code>cfg/field_map_px.json</code>):</div>
+      <input id="out" type="text" value='{"page":<!--PAGENO-->,"name":"FIELD_NAME","x":0,"y":0,"w":0,"h":0}' />
+    </div>
+  </div>
+
+<script>
+const paper=document.getElementById('paper');
+const bg=document.getElementById('bg');
+const cross=document.getElementById('cross');
+const box=document.getElementById('box');
+const out=document.getElementById('out');
+const imgdim=document.getElementById('imgdim');
+let mode="point";
+let drag=false;
+let start=null;
+
+document.getElementById('modePoint').onclick=()=>mode="point";
+document.getElementById('modeBox').onclick=()=>mode="box";
+
+bg.onload=()=>{
+  imgdim.textContent = bg.naturalWidth + "×" + bg.naturalHeight + " px";
+};
+
+function pxFromEvent(e){
+  const r = bg.getBoundingClientRect();
+  const x = (e.clientX - r.left) * (bg.naturalWidth / r.width);
+  const y = (e.clientY - r.top) * (bg.naturalHeight / r.height);
+  return {x:Math.round(x), y:Math.round(y), r};
+}
+
+paper.addEventListener('pointerdown',(e)=>{
+  if(e.target!==bg) return;
+  const p=pxFromEvent(e);
+  if(mode==="point"){
+    cross.style.display="block";
+    cross.style.left = (p.x / bg.naturalWidth * 100) + "%";
+    cross.style.top  = (p.y / bg.naturalHeight * 100) + "%";
+    out.value = out.value.replace(/"x":\s*\d+/, `"x": ${p.x}`).replace(/"y":\s*\d+/, `"y": ${p.y}`);
+  }else{
+    drag=true; start=p;
+    box.style.display="block";
+    box.style.left = (p.x / bg.naturalWidth * 100) + "%";
+    box.style.top  = (p.y / bg.naturalHeight * 100) + "%";
+    box.style.width="0%"; box.style.height="0%";
+  }
+});
+
+paper.addEventListener('pointermove',(e)=>{
+  if(!drag || mode!=="box" || e.target!==bg) return;
+  const p=pxFromEvent(e);
+  const x = Math.min(start.x, p.x);
+  const y = Math.min(start.y, p.y);
+  const w = Math.abs(p.x - start.x);
+  const h = Math.abs(p.y - start.y);
+  box.style.left = (x / bg.naturalWidth * 100) + "%";
+  box.style.top  = (y / bg.naturalHeight * 100) + "%";
+  box.style.width = (w / bg.naturalWidth * 100) + "%";
+  box.style.height= (h / bg.naturalHeight * 100) + "%";
+  out.value = out.value
+    .replace(/"x":\s*\d+/, `"x": ${x}`)
+    .replace(/"y":\s*\d+/, `"y": ${y}`)
+    .replace(/"w":\s*\d+/, `"w": ${w}`)
+    .replace(/"h":\s*\d+/, `"h": ${h}`);
+});
+
+paper.addEventListener('pointerup',()=>{
+  if(mode!=="box") return;
+  drag=false;
+});
+
+document.getElementById('copy').onclick=async()=>{
+  try{ await navigator.clipboard.writeText(out.value); alert("Copié."); }
+  catch{ out.select(); document.execCommand('copy'); alert("Copié (fallback)."); }
+};
+</script>
+</body>
+</html>

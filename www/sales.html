@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Console Vendeurs — Contrats</title>
+<style>
+
+:root{
+  --bg:#f6f7f5; --ink:#131813; --muted:#5a665a; --card:#ffffff; --stroke:#d9ded9;
+  --brand:#1f3a30; --brand-2:#2e5847; --accent:#89e2b2; --ok:#2b7a57; --warn:#b86f00;
+  --radius:16px; --shadow:0 10px 28px rgba(0,0,0,.06);
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{margin:0;font:16px/1.5 system-ui,-apple-system,Segoe UI,Roboto,Inter,Arial;color:var(--ink);background:var(--bg)}
+.container{max-width:1100px;margin:0 auto;padding:20px}
+
+/* Header */
+.header{display:grid;grid-template-columns:88px 1fr minmax(280px,340px);gap:16px;align-items:center;background:var(--card);border:1px solid var(--stroke);border-radius:var(--radius);padding:16px;box-shadow:var(--shadow)}
+.logo{width:88px;height:88px;border-radius:14px;display:grid;place-items:center;background:linear-gradient(135deg,#a7f3c6,#8ad9b3 60%,#5fb492);color:#0e1a14;font-weight:900}
+.header h1{margin:0 0 6px 0;font-size:clamp(1.1rem,1.1rem + 0.8vw,1.7rem)}
+.header p{margin:0;color:var(--muted);font-size:clamp(.92rem,.9rem + .3vw,1rem)}
+.badges{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+.badge{display:inline-flex;align-items:center;gap:8px;padding:8px 10px;border:1px solid var(--stroke);border-radius:999px;background:#f9faf9;color:var(--brand);font-size:.85rem}
+
+/* KPI droite */
+.kpi-card{grid-column:3;border:1px solid var(--stroke);border-radius:12px;background:var(--card);padding:12px}
+.kpi-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.kpi-box{border:1px solid var(--stroke);border-radius:10px;background:#fbfdfb;padding:10px;text-align:center}
+.kpi-box .v{display:block;font-weight:800;color:var(--brand);font-size:1.2rem}
+.kpi-box .l{display:block;color:var(--muted);font-size:.86rem}
+
+/* Buttons */
+.btn{display:inline-flex;align-items:center;gap:8px;padding:10px 14px;border-radius:12px;text-decoration:none;color:#fff;background:var(--brand);border:1px solid #143025;transition:transform .12s ease,box-shadow .12s ease}
+.btn:hover{transform:translateY(-1px);box-shadow:0 8px 18px rgba(23,49,39,.25)}
+.btn:active{transform:translateY(0)}
+.btn.alt{background:var(--brand-2);border-color:#224536}
+.btn.light{background:#e8f5ef;color:var(--brand);border-color:#d6e7df}
+.btn.warn{background:var(--warn);border-color:#915800}
+.btn.small{padding:8px 12px;border-radius:10px;font-size:.92rem}
+.btn.ghost{background:#fff;color:var(--brand);border-color:#dadfda}
+
+/* Accordion */
+.acc{display:grid;gap:14px;margin:18px 0 26px}
+.drop{border:1px solid var(--stroke);border-radius:14px;background:var(--card);box-shadow:var(--shadow);overflow:hidden}
+.drop > input{display:none}
+.drop > label{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 16px;font-weight:700;color:var(--brand);cursor:pointer}
+.drop > label .sub{font-weight:500;color:var(--muted);font-size:.92rem}
+.drop > label .chev{color:#819487;transition:transform .2s ease}
+.drop > .body{max-height:0;opacity:0;overflow:clip;padding:0 16px;transition:max-height .28s ease,opacity .18s ease,padding .16s ease}
+.drop > input:checked + label .chev{transform:rotate(180deg)}
+.drop > input:checked ~ .body{max-height:4000px;opacity:1;padding:0 16px 16px}
+
+/* Cards / forms / table */
+.card{border:1px solid var(--stroke);border-radius:12px;padding:14px;background:#fbfdfb}
+.card h3{margin:0 0 6px 0;color:var(--brand)}
+.grid{display:grid;gap:16px;grid-template-columns:1fr}
+.grid-2{display:grid;gap:16px;grid-template-columns:1fr 1fr}
+.table{width:100%;border-collapse:collapse;border:1px solid var(--stroke);background:#fff;border-radius:10px;overflow:hidden}
+.table th,.table td{padding:10px;border-bottom:1px solid var(--stroke);font-size:.95rem}
+.table th{background:#f4f7f5;color:#31473b;text-align:left}
+.table tr:last-child td{border-bottom:none}
+.right{text-align:right}
+
+.form label{display:block;margin-top:10px;font-size:.92rem;color:#2b3a33}
+.form input,.form textarea,.form select{width:100%;margin-top:6px;padding:10px 12px;border:1px solid var(--stroke);border-radius:10px;background:#ffffff;color:#000}
+.form small{color:var(--muted)}
+.hr{border:0;border-top:1px solid var(--stroke);margin:12px 0}
+
+/* Notes pretty */
+.notes{background:#fff;border:1px solid var(--stroke);border-radius:12px}
+.notes textarea{min-height:96px}
+
+/* Drop zone (plan PDF reçu) */
+.dropzone{border:2px dashed #cfe0d6;border-radius:12px;background:#f8fbf9;padding:14px;text-align:center;color:#31473b}
+.dropzone input{display:block;width:100%;padding:12px;border:1px dashed #cfe0d6;border-radius:10px;background:#fff;margin-top:8px}
+
+/* Modals (no JS, :target) */
+.modal{position:fixed;inset:0;background:rgba(14,22,18,.72);backdrop-filter:blur(4px);display:none;align-items:center;justify-content:center;z-index:3000}
+.modal:target{display:flex}
+.panel{width:min(900px,96vw);max-height:88vh;overflow:auto;background:#fff;border:1px solid var(--stroke);border-radius:16px;box-shadow:var(--shadow);padding:12px}
+.panel .hdr{display:flex;align-items:center;justify-content:space-between;gap:8px;padding-bottom:8px;border-bottom:1px solid var(--stroke)}
+.close{display:inline-flex;align-items:center;gap:6px;padding:8px 12px;border-radius:10px;background:#0f1713;color:#e8fff4;border:1px solid #24382f;text-decoration:none}
+
+/* Footer buttons row */
+.ft{display:flex;gap:10px;flex-wrap:wrap;justify-content:center;margin:12px 0 24px}
+
+/* Mobile */
+@media(max-width:1100px){
+  .container{padding:16px}
+  .header{grid-template-columns:88px 1fr}
+  .kpi-card{grid-column:1 / -1}
+  .grid-2{grid-template-columns:1fr}
+}
+@media(max-width:760px){
+  .header{grid-template-columns:1fr;row-gap:12px;text-align:center}
+  .logo{width:68px;height:68px;justify-self:center}
+  .badges{justify-content:center}
+  .card{padding:12px}
+}
+
+/* Animations */
+@keyframes in{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+.header,.drop{animation:in .22s ease both}
+@media (prefers-reduced-motion: reduce){*{animation:none!important;transition:none!important}}
+
+/* overrides/additions */
+.acc{margin-top:16px}
+.acc details{background:var(--card);border:1px solid var(--stroke);border-radius:var(--radius);box-shadow:var(--shadow);margin-bottom:12px;overflow:hidden}
+.acc summary{list-style:none;cursor:pointer;display:flex;align-items:center;justify-content:space-between;padding:14px 16px;font-weight:900;color:var(--brand)}
+.acc summary::-webkit-details-marker{display:none}
+.acc .body{padding:14px 16px;border-top:1px solid var(--stroke)}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.in{padding:10px 12px;border-radius:12px;border:1px solid var(--stroke);background:#fbfdfb;min-width:260px;flex:1}
+.small{font-size:.85rem;color:var(--muted)}
+.table{width:100%;border-collapse:collapse;margin-top:10px}
+.table th,.table td{border-bottom:1px solid var(--stroke);padding:10px 8px;text-align:left;font-size:.92rem}
+.table th{color:var(--muted);font-weight:900;font-size:.82rem}
+.pill{display:inline-flex;align-items:center;gap:8px;padding:6px 10px;border:1px solid var(--stroke);border-radius:999px;background:#f9faf9;color:var(--brand);font-size:.85rem}
+.notice{margin-top:12px;padding:10px 12px;border:1px dashed var(--stroke);border-radius:12px;background:#fbfdfb;color:var(--muted)}
+.iframeWrap{margin-top:12px;border:1px solid var(--stroke);border-radius:14px;overflow:hidden;background:#fff}
+iframe{width:100%;height:78vh;border:0}
+.toast{position:fixed;right:18px;bottom:18px;max-width:min(520px,92vw);background:var(--brand);color:#fff;padding:12px 14px;border-radius:14px;box-shadow:0 16px 40px rgba(0,0,0,.18);display:none}
+</style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <div class="logo">9999</div>
+      <div>
+        <h1>Console Vendeurs — Contrats</h1>
+        <p>Créer, retrouver, sauvegarder, calculer et envoyer des contrats pour signature.</p>
+        <div class="badges">
+          <span class="badge">Utilisateur: <b><!--USER--></b></span>
+          <a class="badge" href="/logout" style="text-decoration:none">Déconnexion</a>
+        </div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-grid">
+          <div class="kpi-box"><span class="v" id="kpi_total">—</span><span class="l">Contrats</span></div>
+          <div class="kpi-box"><span class="v" id="kpi_pending">—</span><span class="l">À jour</span></div>
+        </div>
+        <div class="small" style="margin-top:8px">Actualisation auto (30s) — notifications pour nouveaux contrats.</div>
+      </div>
+    </div>
+
+    <div class="acc">
+      <details open>
+        <summary>
+          <span>Contrats</span>
+          <span class="pill">Module intégré</span>
+        </summary>
+        <div class="body">
+          <div class="row">
+            <button class="btn" id="btnNew">Nouveau contrat</button>
+            <input class="in" id="openId" placeholder="Ouvrir un contrat (ID / Devis / Tel / Adresse)" />
+            <button class="btn alt" id="btnOpen">Ouvrir</button>
+            <span class="small">Astuce: utilisez la section “Base de données” pour trouver un ID rapidement.</span>
+          </div>
+          <div class="notice">
+            Dans le contrat: <b>Sauvegarder &amp; Calculer</b> → <b>Envoyer</b> → le client reçoit un lien de signature.
+          </div>
+          <div class="iframeWrap">
+            <iframe id="contractFrame" src="/contract"></iframe>
+          </div>
+        </div>
+      </details>
+
+      <details>
+        <summary>
+          <span>Base de données</span>
+          <span class="pill">Recherche</span>
+        </summary>
+        <div class="body">
+          <div class="row">
+            <input class="in" id="q" placeholder="Rechercher: ID, numéro de devis, nom, téléphone, adresse..." />
+            <button class="btn" id="btnSearch">Rechercher</button>
+            <span class="small" id="count"></span>
+          </div>
+
+          <table class="table" id="tbl">
+            <thead>
+              <tr>
+                <th>Dernière maj</th>
+                <th>ID</th>
+                <th>Devis</th>
+                <th>Client</th>
+                <th>Téléphone</th>
+                <th>Adresse</th>
+                <th>Statut</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </details>
+    </div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+<script>
+let lastTop = null;
+
+function fmtDate(iso){
+  try{ return new Date(iso).toLocaleString('fr-CA'); }catch(e){ return iso||''; }
+}
+
+async function search(term){
+  const r = await fetch('/api/contracts_search?q=' + encodeURIComponent(term||''));
+  const j = await r.json();
+  return j.results || [];
+}
+
+function toast(msg){
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.style.display = 'block';
+  clearTimeout(t._h);
+  t._h = setTimeout(()=>t.style.display='none', 6500);
+}
+
+async function refreshKpis(){
+  const res = await search('');
+  document.getElementById('kpi_total').textContent = res.length;
+  document.getElementById('kpi_pending').textContent = res.filter(x=>x.updated_at).length;
+  if(res.length){
+    const top = res[0];
+    const key = (top.contract_id||'') + '|' + (top.updated_at||'');
+    if(lastTop && key !== lastTop){
+      toast('Nouveau / mis à jour: ' + (top.contract_id||'') + ' — ' + (top.client||''));
+    }
+    lastTop = key;
+  }
+}
+
+async function doSearch(){
+  const term = document.getElementById('q').value.trim();
+  const rows = await search(term);
+  document.getElementById('count').textContent = rows.length ? (rows.length + ' résultat(s)') : 'Aucun résultat';
+  const tb = document.querySelector('#tbl tbody');
+  tb.innerHTML = '';
+  for(const r of rows){
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${fmtDate(r.updated_at)}</td>
+      <td><b>${r.contract_id||''}</b></td>
+      <td>${r.quote||''}</td>
+      <td>${r.client||''}</td>
+      <td>${r.phone||''}</td>
+      <td style="max-width:280px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${r.address||''}</td>
+      <td>${r.status||''}</td>
+      <td><button class="btn light" data-id="${r.contract_id||''}">Ouvrir</button></td>
+    `;
+    tb.appendChild(tr);
+  }
+  tb.querySelectorAll('button[data-id]').forEach(b=>{
+    b.addEventListener('click', ()=>{
+      const cid = b.getAttribute('data-id');
+      document.getElementById('contractFrame').src = '/contract?id=' + encodeURIComponent(cid);
+      document.querySelectorAll('.acc details')[0].open = true;
+      window.scrollTo({top:0, behavior:'smooth'});
+    });
+  });
+}
+
+document.getElementById('btnSearch').addEventListener('click', doSearch);
+document.getElementById('q').addEventListener('keydown', (e)=>{ if(e.key==='Enter'){ e.preventDefault(); doSearch(); } });
+
+document.getElementById('btnNew').addEventListener('click', ()=>{
+  document.getElementById('contractFrame').src = '/contract';
+});
+
+document.getElementById('btnOpen').addEventListener('click', async ()=>{
+  const term = document.getElementById('openId').value.trim();
+  if(!term){ return; }
+  if(term.startsWith('c_')){
+    document.getElementById('contractFrame').src = '/contract?id=' + encodeURIComponent(term);
+    return;
+  }
+  const rows = await search(term);
+  if(!rows.length){ toast('Aucun contrat trouvé pour: ' + term); return; }
+  document.getElementById('contractFrame').src = '/contract?id=' + encodeURIComponent(rows[0].contract_id);
+});
+
+refreshKpis();
+setInterval(refreshKpis, 30000);
+</script>
+</body>
+</html>

@@ -1,0 +1,25 @@
+{
+  "server": {
+    "host": "127.0.0.1",
+    "port": 8080
+  },
+  "auth": {
+    "cookie_name": "sid",
+    "session_secret": "CHANGE_THIS_TO_A_LONG_RANDOM_STRING"
+  },
+  "sales_users": {
+    "admin": {
+      "password": "admin",
+      "display_name": "Vendeur 1"
+    }
+  },
+  "smtp": {
+    "enabled": true,
+    "host": "127.0.0.1",
+    "port": 1025,
+    "username": "achrafrostomtouil@protonmail.ch",
+    "password": "R77G0cflgeD8T7sVOi1ruw",
+    "from_email": "achrafrostomtouil@protonmail.ch",
+    "use_tls": true
+  }
+}

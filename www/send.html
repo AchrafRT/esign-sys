@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Envoyer pour signature</title>
+  <style>:root{--page-w:210mm;--page-h:297mm;--ink:#0b0f19;--muted:#667085;--line:#e6e8ee;--card:#fff;--bg:#f4f6fb;--shadow:0 12px 36px rgba(16,24,40,.12);--radius:14px}
+*{box-sizing:border-box}body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;background:var(--bg);color:var(--ink)}a{color:inherit}
+.topbar{position:sticky;top:0;z-index:50;display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:10px 14px;background:rgba(255,255,255,.92);backdrop-filter:saturate(180%) blur(10px);border-bottom:1px solid var(--line)}
+.brand{font-weight:900;letter-spacing:.2px}.pill{display:inline-flex;align-items:center;gap:8px;padding:6px 10px;border:1px solid var(--line);border-radius:999px;background:#fff;font-size:12px;font-weight:800}
+.btn{appearance:none;border:1px solid var(--line);background:#0b0f19;color:#fff;padding:8px 12px;border-radius:12px;cursor:pointer;text-decoration:none;font-weight:800}
+.btn.secondary{background:#fff;color:#0b0f19}.input{padding:8px 10px;border-radius:12px;border:1px solid var(--line);background:#fff;min-width:260px;max-width:85vw}
+.wrap{max-width:calc(var(--page-w) + 120px);margin:16px auto 80px;padding:0 14px}.hint{font-size:12px;color:var(--muted)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);box-shadow:0 1px 0 rgba(16,24,40,.02);padding:12px;margin:12px 0}
+.page{width:var(--page-w);height:var(--page-h);margin:18px auto;background:#fff;border:1px solid var(--line);border-radius:18px;box-shadow:var(--shadow);position:relative;overflow:hidden}
+.page img.bg{width:100%;height:100%;display:block;object-fit:cover}.overlay{position:absolute;inset:0}.field{position:absolute}
+.field input{width:100%;height:100%;border:1px solid rgba(11,15,25,.25);border-radius:8px;padding:4px 6px;background:rgba(255,255,255,.82);font-size:12px}
+.field input[readonly]{background:rgba(247,248,250,.92);color:#111}.field .lbl{position:absolute;left:0;top:-18px;font-size:11px;font-weight:800;background:rgba(255,255,255,.92);border:1px solid rgba(11,15,25,.12);border-radius:999px;padding:2px 8px}
+.sigzone{position:absolute;border:2px dashed rgba(11,15,25,.35);border-radius:14px;overflow:hidden}
+.sigzone .blur{position:absolute;inset:0;backdrop-filter:blur(3px);background:rgba(255,255,255,.35)}
+.sigzone .lock{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:10px;background:rgba(255,255,255,.62);font-weight:900}
+.sigzone .lock .small{font-size:12px;color:#333;font-weight:700}.sigzone.signed{border-style:solid;border-color:rgba(2,122,72,.45)}
+.sigzone.signed .lock,.sigzone.signed .blur{display:none}.sigzone img{width:100%;height:100%;object-fit:contain;background:rgba(255,255,255,.55)}
+@media print{body{background:#fff}.topbar,.card{display:none}.wrap{max-width:none;margin:0;padding:0}.page{box-shadow:none;border:none;margin:0;border-radius:0;page-break-after:always}.field input{border:none;background:transparent}.sigzone{border:none}}</style>
+</head>
+<body>
+<!--TOPBAR-->
+<div class="wrap">
+  <div class="card">
+    <h2>Envoyer pour signature</h2>
+    <p>Contrat: <strong><!--CID--></strong></p>
+    <form method="POST" action="/contract/send">
+      <input type="hidden" name="contract_id" value="<!--CID-->">
+      <label>Email du client<br><input class="input" name="client_email" type="email" required></label><br><br>
+      <label>Email du représentant<br><input class="input" name="rep_email" type="email" required></label><br><br>
+      <button class="btn" type="submit">Envoyer les liens</button>
+    </form>
+    <p class="hint" style="margin-top:10px">SMTP configurable dans <code>app/settings.json</code>.</p>
+  </div>
+</div>
+</body>
+</html>

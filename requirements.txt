@@ -1,0 +1,2 @@
+# No hard deps (stdlib only)
+# python-dotenv==1.0.1  # optional

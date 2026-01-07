@@ -1,0 +1,25 @@
+{
+  "Prix_de_vente_avant_taxes": "100.00",
+  "TPS_5_730072220RT0001": "5.00",
+  "TVQ_9975_1232208119TQ0001": "9.98",
+  "Total_prix_de_vente_avec_taxes": "114.97",
+  "payments.no_finance.amount_at_measure": "45.99",
+  "payments.no_finance.amount_pre_delivery": "68.98",
+  "undefined": "45.99",
+  "undefined_2": "68.98",
+  "x_599": "0.00",
+  "x_299": "0.00",
+  "x_199": "0.00",
+  "x_399": "0.00",
+  "x_199_2": "0.00",
+  "x_299_2": "0.00",
+  "x_999": "0.00",
+  "x_1499": "0.00",
+  "pi2_x_199": "0.00",
+  "x_2499": "0.00",
+  "undefined_3": "0.00",
+  "undefined_4": "0.00",
+  "_meta": {
+    "computed_at": "2026-01-02T14:39:42.105691+00:00"
+  }
+}

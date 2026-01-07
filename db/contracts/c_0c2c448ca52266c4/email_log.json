@@ -1,0 +1,15 @@
+{
+  "sent_at": "2026-01-02T14:51:22.461155+00:00",
+  "client_email": "admin@sayf.agency",
+  "rep_email": "sales@sayf.agency",
+  "client_link": "http://127.0.0.1:8080/sign?token=f236cd311382aa0617e4fd6e9973e615",
+  "rep_link": "http://127.0.0.1:8080/sign?token=0f19ccbd2de0a4e1f152e23792d72589",
+  "smtp_client": {
+    "ok": true,
+    "msg": "sent"
+  },
+  "smtp_rep": {
+    "ok": true,
+    "msg": "sent"
+  }
+}
