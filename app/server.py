@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import os, json, base64, glob, secrets, urllib.parse, mimetypes, smtplib, struct, re, hmac, hashlib
+import os, json, base64, glob, secrets, urllib.parse, mimetypes, smtplib, struct, hmac, hashlib
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from datetime import datetime, timezone
 from email.message import EmailMessage
@@ -13,6 +13,7 @@ ASSETS = os.path.join(WWW, "assets")
 CFG_PX  = os.path.join(ROOT, "cfg", "field_map_px.json")
 DB   = os.path.join(ROOT, "db", "contracts")
 SETTINGS_PATH = os.path.join(os.path.dirname(__file__), "settings.json")
+
 os.makedirs(DB, exist_ok=True)
 
 # Sessions + simple auth (stdlib only)
@@ -323,9 +324,23 @@ def signature_state(cid):
     return s
 
 def mark_signed_if_complete(cid):
+    """
+    Required statuses:
+      - signed_client : client signed only
+      - signed_rep    : rep signed only
+      - signed        : both signed
+    """
     s = signature_state(cid)
-    if s.get("client") and s.get("rep"):
+    has_client = bool(s.get("client"))
+    has_rep = bool(s.get("rep"))
+
+    if has_client and has_rep:
         set_status(cid, "signed")
+    elif has_client:
+        set_status(cid, "signed_client")
+    elif has_rep:
+        set_status(cid, "signed_rep")
+    # else: do nothing (keep current)
 
 def base_url(handler):
     proto = handler.headers.get("X-Forwarded-Proto")
@@ -362,9 +377,8 @@ def send_email(settings, to_email, subject, body):
 # HTTP Handler
 # -------------------------
 class H(BaseHTTPRequestHandler):
-    # IMPORTANT for Render: handle HEAD probes
+    # Render sometimes probes with HEAD
     def do_HEAD(self):
-        # Keep it simple: tell Render "I'm alive"
         self.send_response(200)
         self.send_header("Content-Type", "text/plain; charset=utf-8")
         self.send_header("Content-Length", "0")
@@ -384,6 +398,7 @@ class H(BaseHTTPRequestHandler):
             if "=" in part:
                 k, v = part.split("=", 1)
                 cookies[k.strip()] = v.strip()
+
         sid_val = cookies.get(cookie_name)
         sid = parse_cookie_value(secret, sid_val)
         if not sid:
@@ -406,15 +421,14 @@ class H(BaseHTTPRequestHandler):
 
         # Route aliases (avoid UI mismatch)
         if path == "/contracts":
-            # if UI embeds /contracts, map it
             return self.redirect("/contract" + (("?" + u.query) if u.query else ""))
 
-        # Static
+        # Static assets
         if path.startswith("/assets/"):
             f = os.path.join(WWW, path.lstrip("/"))
             return self.serve_file(f, None)
 
-        # Auth pages
+        # Login/logout
         if path in ("/login", "/logout"):
             if path == "/logout":
                 s = self.settings()
@@ -428,6 +442,7 @@ class H(BaseHTTPRequestHandler):
             return self.send_html(tpl)
 
         # Public routes (must not require login)
+        # IMPORTANT: include /sign/done so client/rep can finish without being bounced to login
         public_prefixes = ("/sign", "/contract/signature_image", "/contract/print")
         if not path.startswith(public_prefixes):
             if not self.require_login():
@@ -452,9 +467,11 @@ class H(BaseHTTPRequestHandler):
 
                 tokens = [cid]
                 def add(v):
-                    if v is None: return
+                    if v is None:
+                        return
                     v = str(v).strip()
-                    if v: tokens.append(v)
+                    if v:
+                        tokens.append(v)
 
                 add(deep_get(fields, "contract.quote_number"))
                 add(deep_get(fields, "client.first_name"))
@@ -486,12 +503,49 @@ class H(BaseHTTPRequestHandler):
             self.wfile.write(payload)
             return
 
+        # ---- SEND PAGE (THIS IS THE MISSING PIECE THAT CAUSED BLACK "NOT FOUND")
+        if path == "/contract/send":
+            cid = q.get("id", [""])[0]
+            if not cid:
+                return self.send_text("missing id", 400)
+            ensure_contract(cid)
+
+            html = f"""<!doctype html><html lang='fr'><head>
+<meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>
+<title>Envoyer — {esc(cid)}</title>
+<style>
+body{{margin:0;font-family:system-ui;background:#0b0f19;color:#e5e7eb}}
+.top{{padding:12px 14px;background:rgba(17,24,39,.9);border-bottom:1px solid rgba(255,255,255,.10);display:flex;gap:10px;align-items:center;flex-wrap:wrap}}
+.btn{{border:1px solid rgba(255,255,255,.10);border-radius:12px;padding:9px 12px;background:#f5c542;color:#111;font-weight:900;text-decoration:none;cursor:pointer}}
+.btn.secondary{{background:rgba(15,23,42,.80);color:#e5e7eb}}
+.card{{max-width:720px;margin:18px auto;padding:14px;border:1px solid rgba(255,255,255,.10);border-radius:16px;background:rgba(15,23,42,.60)}}
+input{{width:100%;padding:10px 12px;border-radius:12px;border:1px solid rgba(255,255,255,.10);background:rgba(15,23,42,.80);color:#e5e7eb}}
+label{{font-weight:900;font-size:13px}}
+.hint{{font-size:12px;opacity:.8}}
+</style></head><body>
+<div class='top'>
+  <a class='btn secondary' href='/contract?id={urllib.parse.quote(cid)}'>Retour</a>
+  <div style='font-weight:900'>Envoyer pour signature — {esc(cid)}</div>
+</div>
+<div class='card'>
+  <form method='POST' action='/contract/send'>
+    <input type='hidden' name='contract_id' value='{esc(cid)}'>
+    <label>Email du client</label><br><input name='client_email' type='email' required><br><br>
+    <label>Email du représentant</label><br><input name='rep_email' type='email' required><br><br>
+    <button class='btn' type='submit'>Envoyer les liens</button>
+  </form>
+  <p class='hint'>SMTP est optionnel. Si désactivé, les liens sont enregistrés dans <code>db/contracts/{esc(cid)}/email_log.json</code>.</p>
+</div>
+</body></html>"""
+            return self.send_html(html)
+
         # ---- print signed contract (public)
         if path == "/contract/print":
             cid = q.get("id", [""])[0]
             if not cid:
                 return self.send_text("missing id", 400)
             ensure_contract(cid)
+
             cfg = read_json(CFG_PX, {"fields": [], "signature_zones": []})
             fields_map = cfg.get("fields", []) if isinstance(cfg, dict) else []
             sig_map    = cfg.get("signature_zones", []) if isinstance(cfg, dict) else []
@@ -611,7 +665,7 @@ class H(BaseHTTPRequestHandler):
             html = tpl.replace("<!--PAGENO-->", str(pageno)).replace("<!--IMGURL-->", f"/assets/{esc(img)}")
             return self.send_html(html)
 
-        # ---- contract view (also allow /contract and /)
+        # ---- contract view
         if path in ("/contract",):
             cid = q.get("id", [None])[0] or ("c_" + secrets.token_hex(8))
             ensure_contract(cid)
@@ -747,7 +801,7 @@ class H(BaseHTTPRequestHandler):
             html = tpl.replace("<!--TOPBAR-->", topbar).replace("<!--PAGES-->", "".join(sections))
             return self.send_html(html)
 
-        # ---- signature image
+        # ---- signature image (public)
         if path == "/contract/signature_image":
             cid = q.get("id", [""])[0]
             who = q.get("who", [""])[0]
@@ -760,7 +814,7 @@ class H(BaseHTTPRequestHandler):
                 return self.send_text("not found", 404)
             return self.serve_file(png_path, "image/png")
 
-        # ---- sign flow
+        # ---- sign flow (public)
         if path == "/sign":
             token = q.get("token", [""])[0]
             if not token:
@@ -819,12 +873,9 @@ body{{margin:0;font-family:system-ui;background:#0b0f19;color:#e5e7eb}}
         path = u.path
 
         # POST alias for UI mismatch
-        if path == "/contracts/save":
-            path = "/contract/save"
-        if path == "/contracts/compute":
-            path = "/contract/compute"
-        if path == "/contracts/send":
-            path = "/contract/send"
+        if path == "/contracts/save":    path = "/contract/save"
+        if path == "/contracts/compute": path = "/contract/compute"
+        if path == "/contracts/send":    path = "/contract/send"
 
         length = int(self.headers.get("Content-Length", "0") or "0")
         raw = self.rfile.read(length) if length else b""
@@ -929,7 +980,6 @@ body{{margin:0;font-family:system-ui;background:#0b0f19;color:#e5e7eb}}
                 b["fields"] = fields if isinstance(fields, dict) else {}
                 b["calc"] = calc if isinstance(calc, dict) else {}
                 save_bundle(cid, b)
-
                 write_json(os.path.join(cdir(cid), "fields.json"), b["fields"])
                 write_json(os.path.join(cdir(cid), "calc.json"), b["calc"])
 
@@ -941,7 +991,7 @@ body{{margin:0;font-family:system-ui;background:#0b0f19;color:#e5e7eb}}
             self.wfile.write(payload)
             return
 
-        # SEND
+        # SEND (creates 2 tokens, logs links, updates status)
         if path == "/contract/send":
             cid = (form.get("contract_id") or "").strip()
             client_email = (form.get("client_email") or "").strip()
@@ -949,6 +999,9 @@ body{{margin:0;font-family:system-ui;background:#0b0f19;color:#e5e7eb}}
             if not cid or not client_email or not rep_email:
                 return self.send_text("missing", 400)
             ensure_contract(cid)
+
+            # creating tokens implies "to_sign"
+            set_status(cid, "to_sign")
 
             t_client = store_token(cid, "client", client_email)
             t_rep = store_token(cid, "rep", rep_email)
@@ -972,10 +1025,9 @@ body{{margin:0;font-family:system-ui;background:#0b0f19;color:#e5e7eb}}
                 "smtp_rep": {"ok": ok2, "msg": msg2},
             })
 
-            set_status(cid, "to_sign")
             return self.redirect(f"/contract?id={urllib.parse.quote(cid)}")
 
-        # SIGN SUBMIT
+        # SIGN SUBMIT (public)
         if path == "/sign/submit":
             token = (form.get("token") or "").strip()
             mode = (form.get("mode") or "draw").strip()
@@ -1035,7 +1087,9 @@ body{{margin:0;font-family:system-ui;background:#0b0f19;color:#e5e7eb}}
             all_tokens[token]["used_at"] = now_iso()
             write_json(tp, all_tokens)
 
+            # updates status to signed_client / signed_rep / signed
             mark_signed_if_complete(cid)
+
             return self.redirect(f"/sign/done?cid={urllib.parse.quote(cid)}")
 
         return self.send_text("Not found", 404)
@@ -1080,10 +1134,8 @@ body{{margin:0;font-family:system-ui;background:#0b0f19;color:#e5e7eb}}
 # Entry point for Render
 # -------------------------
 if __name__ == "__main__":
-    # Render expects you to bind to 0.0.0.0 and its PORT env var
     HOST = "0.0.0.0"
     PORT = int(os.environ.get("PORT", "10000"))
-
     print(f"Starting server on {HOST}:{PORT}")
     httpd = ThreadingHTTPServer((HOST, PORT), H)
     httpd.serve_forever()
