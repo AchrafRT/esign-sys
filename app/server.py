@@ -1,30 +1,31 @@
 #!/usr/bin/env python3
-import os, json, base64, glob, secrets, urllib.parse, mimetypes, struct, hmac, hashlib
+import os, json, base64, glob, secrets, urllib.parse, mimetypes, smtplib, struct, hmac, hashlib, traceback
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from datetime import datetime, timezone
-
-# NOTE:
-# - This revised version is Render-safe and eliminates 502s caused by SMTP attempts.
-# - "Envoyer" becomes "Generate links (manual send)".
-# - Links are displayed on-screen + saved to db/contracts/<cid>/email_log.json
-# - Status tracking: draft -> to_sign -> signed_client/signed_rep -> signed (both)
-# - Public routes include /sign/done (fixes login bounce + black screens)
-# - Robust error handling: no unhandled exceptions -> no Render 502
+from email.message import EmailMessage
 
 # -------------------------
 # Paths
 # -------------------------
+# If server.py is in /app, ROOT becomes repo root.
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-WWW  = os.path.join(ROOT, "www")
-ASSETS = os.path.join(WWW, "assets")
-CFG_PX  = os.path.join(ROOT, "cfg", "field_map_px.json")
-DB   = os.path.join(ROOT, "db", "contracts")
-SETTINGS_PATH = os.path.join(ROOT, "settings.json")
 
+WWW    = os.path.join(ROOT, "www")
+ASSETS = os.path.join(WWW, "assets")
+CFG_PX = os.path.join(ROOT, "cfg", "field_map_px.json")
+
+DB = os.path.join(ROOT, "db", "contracts")
 os.makedirs(DB, exist_ok=True)
 
-# Sessions + simple auth (stdlib only)
+# Sessions (note: Render disk can be ephemeral depending on your plan)
 SESSIONS_PATH = os.path.join(ROOT, "db", "sessions.json")
+os.makedirs(os.path.dirname(SESSIONS_PATH), exist_ok=True)
+
+# Settings: try multiple locations
+SETTINGS_CANDIDATES = [
+    os.path.join(ROOT, "settings.json"),                   # repo root (recommended)
+    os.path.join(os.path.dirname(__file__), "settings.json"),  # alongside server.py (/app/settings.json)
+]
 
 # -------------------------
 # Helpers
@@ -40,7 +41,7 @@ def read_text(path, default=""):
         return default
 
 def read_json(path, default):
-    if not os.path.exists(path):
+    if not path or not os.path.exists(path):
         return default
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -55,19 +56,41 @@ def write_json(path, obj):
         json.dump(obj, f, ensure_ascii=False, indent=2)
     os.replace(tmp, path)
 
+def find_settings_path():
+    # allow explicit override on Render
+    env_path = os.environ.get("SETTINGS_PATH", "").strip()
+    if env_path and os.path.exists(env_path):
+        return env_path
+    for p in SETTINGS_CANDIDATES:
+        if os.path.exists(p):
+            return p
+    return None
+
 def load_settings():
-    s = read_json(SETTINGS_PATH, {})
+    p = find_settings_path()
+    s = read_json(p, {}) if p else {}
     if not isinstance(s, dict):
         s = {}
+
+    # auth defaults
     s.setdefault("auth", {})
     s["auth"].setdefault("cookie_name", "sid")
-    s["auth"].setdefault("session_secret", "CHANGE_ME")
+    s["auth"]["session_secret"] = (
+        os.environ.get("SESSION_SECRET")
+        or s["auth"].get("session_secret")
+        or "CHANGE_ME"
+    )
+
+    # users: settings.json OR env
     s.setdefault("sales_users", {})
-    # legacy alias
     if isinstance(s.get("users"), dict) and not s.get("sales_users"):
         s["sales_users"] = s["users"]
-    # OPTIONAL: allow forcing the base URL (useful if you want to override headers)
-    # s.setdefault("public_base_url", "")
+
+    env_user = os.environ.get("SALES_USER", "").strip()
+    env_pass = os.environ.get("SALES_PASS", "").strip()
+    if env_user and env_pass:
+        s["sales_users"][env_user] = {"password": env_pass}
+
     return s
 
 def sessions_load():
@@ -120,9 +143,6 @@ def bundle_path(cid):
     return os.path.join(cdir(cid), "contract.json")
 
 def load_bundle(cid):
-    """
-    contract.json = { meta: {...}, fields: {...}, calc: {...} }
-    """
     ensure_contract(cid)
     b = read_json(bundle_path(cid), None)
     if isinstance(b, dict):
@@ -131,7 +151,6 @@ def load_bundle(cid):
         b.setdefault("calc", {})
         return b
 
-    # bootstrap from legacy files if present
     meta = read_json(os.path.join(cdir(cid), "meta.json"),
                      {"contract_id": cid, "created_at": now_iso(), "status": "empty"})
     fields = read_json(os.path.join(cdir(cid), "fields.json"), {})
@@ -159,7 +178,6 @@ def set_status(cid, status):
     b["meta"]["status"] = status
     b["meta"]["updated_at"] = now_iso()
     save_bundle(cid, b)
-    # legacy sync
     write_json(os.path.join(cdir(cid), "meta.json"), b["meta"])
 
 def deep_get(d, dotted):
@@ -191,7 +209,7 @@ def png_size(path):
             length = struct.unpack(">I", hdr[:4])[0]
             ctype = hdr[4:]
             chunk = f.read(length)
-            f.read(4)  # crc
+            f.read(4)
             if ctype == b'IHDR':
                 w, h = struct.unpack(">II", chunk[:8])
                 return (w, h)
@@ -230,7 +248,6 @@ def compute_calculations(fields):
     total = before_tax + tps + tvq
 
     line_totals = {}
-
     def mul(q_field, unit_price, out_field):
         q = get(q_field)
         amt = q * unit_price
@@ -299,7 +316,6 @@ def calc_and_store(cid, fields):
     b["meta"]["updated_at"] = now_iso()
     save_bundle(cid, b)
 
-    # legacy sync
     write_json(os.path.join(cdir(cid), "fields.json"), b["fields"])
     write_json(os.path.join(cdir(cid), "calc.json"), b["calc"])
     write_json(os.path.join(cdir(cid), "meta.json"), b["meta"])
@@ -333,16 +349,9 @@ def signature_state(cid):
     return s
 
 def mark_signed_if_complete(cid):
-    """
-    Required statuses:
-      - signed_client : client signed only
-      - signed_rep    : rep signed only
-      - signed        : both signed
-    """
     s = signature_state(cid)
     has_client = bool(s.get("client"))
     has_rep = bool(s.get("rep"))
-
     if has_client and has_rep:
         set_status(cid, "signed")
     elif has_client:
@@ -351,33 +360,53 @@ def mark_signed_if_complete(cid):
         set_status(cid, "signed_rep")
 
 def base_url(handler):
-    # Prefer explicit public URL in settings if provided
-    settings = load_settings()
-    forced = (settings or {}).get("public_base_url", "") if isinstance(settings, dict) else ""
-    forced = (forced or "").strip().rstrip("/")
-    if forced:
-        return forced
-
     proto = handler.headers.get("X-Forwarded-Proto")
     host  = handler.headers.get("X-Forwarded-Host") or handler.headers.get("Host") or "localhost"
     scheme = "https" if proto == "https" else "http"
-    return f"{scheme}://{host}".rstrip("/")
+    return f"{scheme}://{host}"
+
+def send_email(settings, to_email, subject, body):
+    smtp = (settings or {}).get("smtp", {})
+    if not smtp.get("enabled"):
+        return False, "SMTP disabled"
+    host = smtp.get("host")
+    if not host:
+        return False, "SMTP host missing"
+
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = smtp.get("from_email", smtp.get("username","no-reply@localhost"))
+    msg["To"] = to_email
+    msg.set_content(body)
+
+    port = int(smtp.get("port", 587))
+    user = smtp.get("username")
+    pwd  = smtp.get("password")
+    use_tls = bool(smtp.get("use_tls", True))
+
+    with smtplib.SMTP(host, port, timeout=25) as s:
+        s.ehlo()
+        if use_tls:
+            s.starttls()
+            s.ehlo()
+        if user and pwd:
+            s.login(user, pwd)
+        s.send_message(msg)
+    return True, "sent"
 
 # -------------------------
 # HTTP Handler
 # -------------------------
 class H(BaseHTTPRequestHandler):
-    # Render sometimes probes with HEAD
     def do_HEAD(self):
         self.send_response(200)
         self.send_header("Content-Type", "text/plain; charset=utf-8")
         self.send_header("Content-Length", "0")
         self.end_headers()
 
-    # Avoid noisy default logging (optional)
-    def log_message(self, format, *args):
-        # Keep Render logs clean. Comment out to restore default.
-        return
+    def log_exception(self):
+        # puts stacktrace in Render logs
+        traceback.print_exc()
 
     def settings(self):
         return load_settings()
@@ -409,25 +438,22 @@ class H(BaseHTTPRequestHandler):
     def redirect_login(self):
         return self.redirect("/login")
 
-    # --------
-    # GET
-    # --------
     def do_GET(self):
         try:
             u = urllib.parse.urlparse(self.path)
             path = u.path
             q = urllib.parse.parse_qs(u.query)
 
-            # Route aliases (avoid UI mismatch)
+            # alias
             if path == "/contracts":
                 return self.redirect("/contract" + (("?" + u.query) if u.query else ""))
 
-            # Static assets
+            # static
             if path.startswith("/assets/"):
                 f = os.path.join(WWW, path.lstrip("/"))
                 return self.serve_file(f, None)
 
-            # Login/logout
+            # auth pages
             if path in ("/login", "/logout"):
                 if path == "/logout":
                     s = self.settings()
@@ -438,10 +464,13 @@ class H(BaseHTTPRequestHandler):
                     self.end_headers()
                     return
                 tpl = read_text(os.path.join(WWW, "login.html"))
+                # small debug hint if no users loaded
+                st = self.settings()
+                if not (st.get("sales_users") or {}):
+                    tpl = tpl.replace("<!--ERROR-->", "⚠️ Aucun utilisateur configuré. Ajoute SALES_USER / SALES_PASS sur Render.")
                 return self.send_html(tpl)
 
-            # Public routes (must not require login)
-            # IMPORTANT: include /sign/done so client/rep can finish without being bounced to login
+            # public routes
             public_prefixes = ("/sign", "/contract/signature_image", "/contract/print")
             if not path.startswith(public_prefixes):
                 if not self.require_login():
@@ -452,7 +481,6 @@ class H(BaseHTTPRequestHandler):
                 user = self.current_user() or ""
                 return self.send_html(tpl.replace("<!--USER-->", esc(user)))
 
-            # ---- search api
             if path == "/api/contracts_search":
                 term = (q.get("q", [""])[0] or "").strip().lower()
                 out = []
@@ -466,11 +494,9 @@ class H(BaseHTTPRequestHandler):
 
                     tokens = [cid]
                     def add(v):
-                        if v is None:
-                            return
+                        if v is None: return
                         v = str(v).strip()
-                        if v:
-                            tokens.append(v)
+                        if v: tokens.append(v)
 
                     add(deep_get(fields, "contract.quote_number"))
                     add(deep_get(fields, "client.first_name"))
@@ -502,17 +528,12 @@ class H(BaseHTTPRequestHandler):
                 self.wfile.write(payload)
                 return
 
-            # ---- SEND PAGE (GET)
+            # SEND PAGE
             if path == "/contract/send":
-                cid = (q.get("id", [""])[0] or "").strip()
+                cid = q.get("id", [""])[0]
                 if not cid:
                     return self.send_text("missing id", 400)
                 ensure_contract(cid)
-
-                # If links already exist, show them too
-                elog = read_json(os.path.join(cdir(cid), "email_log.json"), {})
-                existing_client = (elog or {}).get("client_link", "")
-                existing_rep = (elog or {}).get("rep_link", "")
 
                 html = f"""<!doctype html><html lang='fr'><head>
 <meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>
@@ -522,14 +543,11 @@ body{{margin:0;font-family:system-ui;background:#0b0f19;color:#e5e7eb}}
 .top{{padding:12px 14px;background:rgba(17,24,39,.9);border-bottom:1px solid rgba(255,255,255,.10);display:flex;gap:10px;align-items:center;flex-wrap:wrap}}
 .btn{{border:1px solid rgba(255,255,255,.10);border-radius:12px;padding:9px 12px;background:#f5c542;color:#111;font-weight:900;text-decoration:none;cursor:pointer}}
 .btn.secondary{{background:rgba(15,23,42,.80);color:#e5e7eb}}
-.card{{max-width:860px;margin:18px auto;padding:14px;border:1px solid rgba(255,255,255,.10);border-radius:16px;background:rgba(15,23,42,.60)}}
+.card{{max-width:760px;margin:18px auto;padding:14px;border:1px solid rgba(255,255,255,.10);border-radius:16px;background:rgba(15,23,42,.60)}}
 input{{width:100%;padding:10px 12px;border-radius:12px;border:1px solid rgba(255,255,255,.10);background:rgba(15,23,42,.80);color:#e5e7eb}}
 label{{font-weight:900;font-size:13px}}
 .hint{{font-size:12px;opacity:.8}}
-.row{{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin:10px 0}}
-.mono{{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace}}
-small{{opacity:.85}}
-hr{{border:none;border-top:1px solid rgba(255,255,255,.12);margin:14px 0}}
+code{{background:rgba(0,0,0,.25);padding:2px 6px;border-radius:8px}}
 </style></head><body>
 <div class='top'>
   <a class='btn secondary' href='/contract?id={urllib.parse.quote(cid)}'>Retour</a>
@@ -540,31 +558,19 @@ hr{{border:none;border-top:1px solid rgba(255,255,255,.12);margin:14px 0}}
     <input type='hidden' name='contract_id' value='{esc(cid)}'>
     <label>Email du client</label><br><input name='client_email' type='email' required><br><br>
     <label>Email du représentant</label><br><input name='rep_email' type='email' required><br><br>
-    <button class='btn' type='submit'>Générer les liens (envoi manuel)</button>
+    <button class='btn' type='submit'>Générer les liens</button>
   </form>
-
-  <p class='hint'>Sur Render: pas d'email sortant sans SMTP externe. Ici on génère les liens et vous les envoyez manuellement (Proton/SMS).</p>
-
-  {"<hr>" if (existing_client or existing_rep) else ""}
-  {f"<div><small>Liens existants (dernier envoi):</small></div>" if (existing_client or existing_rep) else ""}
-  {f"<div class='row'><div style='min-width:120px;font-weight:900'>Client</div><input class='mono' id='l1' value='{esc(existing_client)}' readonly><button class='btn secondary' onclick=\"copy('l1');return false;\">Copier</button></div>" if existing_client else ""}
-  {f"<div class='row'><div style='min-width:120px;font-weight:900'>Représentant</div><input class='mono' id='l2' value='{esc(existing_rep)}' readonly><button class='btn secondary' onclick=\"copy('l2');return false;\">Copier</button></div>" if existing_rep else ""}
+  <p class='hint'>
+    ⚙️ Sans serveur email (SMTP), l’app fonctionne quand même: elle génère les liens et les enregistre dans
+    <code>db/contracts/{esc(cid)}/email_log.json</code>.
+  </p>
 </div>
-
-<script>
-function copy(id){{
-  var el = document.getElementById(id);
-  if(!el) return;
-  el.focus(); el.select();
-  try{{ document.execCommand('copy'); }}catch(e){{}}
-}}
-</script>
 </body></html>"""
                 return self.send_html(html)
 
-            # ---- print signed contract (public)
+            # PRINT (public)
             if path == "/contract/print":
-                cid = (q.get("id", [""])[0] or "").strip()
+                cid = q.get("id", [""])[0]
                 if not cid:
                     return self.send_text("missing id", 400)
                 ensure_contract(cid)
@@ -607,9 +613,7 @@ function copy(id){{
                         h_pct = (h / ih) * 100.0
                         style = f"left:{x_pct:.6f}%;top:{y_pct:.6f}%;width:{w_pct:.6f}%;height:{h_pct:.6f}%;"
                         overlay.append(
-                            f"<div class='field' style='{style}'>"
-                            f"<div class='txt'>{esc(val)}</div>"
-                            f"</div>"
+                            f"<div class='field' style='{style}'><div class='txt'>{esc(val)}</div></div>"
                         )
 
                     for sm in sig_map:
@@ -677,19 +681,8 @@ function copy(id){{
 </body></html>"""
                 return self.send_html(html)
 
-            # ---- mapper tool
-            if path == "/mapper":
-                pageno = int(q.get("page", ["1"])[0] or "1")
-                pages = sorted(glob.glob(os.path.join(ASSETS, "page_*.png")))
-                if pageno < 1 or pageno > len(pages):
-                    return self.send_text("bad page", 400)
-                img = os.path.basename(pages[pageno-1])
-                tpl = read_text(os.path.join(WWW, "mapper.html"))
-                html = tpl.replace("<!--PAGENO-->", str(pageno)).replace("<!--IMGURL-->", f"/assets/{esc(img)}")
-                return self.send_html(html)
-
-            # ---- contract view
-            if path in ("/contract",):
+            # CONTRACT VIEW
+            if path == "/contract":
                 cid = q.get("id", [None])[0] or ("c_" + secrets.token_hex(8))
                 ensure_contract(cid)
 
@@ -763,6 +756,7 @@ function copy(id){{
                             continue
                         who = sm.get("who")
                         label = sm.get("label", "Signature")
+
                         x = float(sm["x"]); y = float(sm["y"]); w = float(sm["w"]); h = float(sm["h"])
                         x_pct = (x / iw) * 100.0
                         y_pct = (y / ih) * 100.0
@@ -824,10 +818,10 @@ function copy(id){{
                 html = tpl.replace("<!--TOPBAR-->", topbar).replace("<!--PAGES-->", "".join(sections))
                 return self.send_html(html)
 
-            # ---- signature image (public)
+            # signature image (public)
             if path == "/contract/signature_image":
-                cid = (q.get("id", [""])[0] or "").strip()
-                who = (q.get("who", [""])[0] or "").strip()
+                cid = q.get("id", [""])[0]
+                who = q.get("who", [""])[0]
                 if not cid or who not in ("client", "rep"):
                     return self.send_text("bad request", 400)
                 sigs = signature_state(cid)
@@ -837,9 +831,9 @@ function copy(id){{
                     return self.send_text("not found", 404)
                 return self.serve_file(png_path, "image/png")
 
-            # ---- sign flow (public)
+            # sign flow (public)
             if path == "/sign":
-                token = (q.get("token", [""])[0] or "").strip()
+                token = q.get("token", [""])[0]
                 if not token:
                     return self.send_text("missing token", 400)
                 tp, all_tokens, rec = token_lookup(token)
@@ -867,11 +861,9 @@ function copy(id){{
                 return self.send_html(tpl.replace("<!--PAYLOAD-->", esc(payload)))
 
             if path == "/sign/done":
-                cid = (q.get("cid", [""])[0] or "").strip()
+                cid = q.get("cid", [""])[0]
                 if not cid:
                     return self.send_text("missing cid", 400)
-                meta = (load_bundle(cid).get("meta") or {})
-                status = meta.get("status", "")
                 html = f"""<!doctype html><html lang='fr'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Merci</title>
 <style>
 body{{margin:0;font-family:system-ui;background:#0b0f19;color:#e5e7eb}}
@@ -879,13 +871,11 @@ body{{margin:0;font-family:system-ui;background:#0b0f19;color:#e5e7eb}}
 .card{{background:rgba(15,23,42,.65);border:1px solid rgba(255,255,255,.12);border-radius:18px;padding:18px}}
 .btn{{display:inline-block;margin-top:14px;border:1px solid rgba(255,255,255,.12);border-radius:14px;padding:10px 14px;background:#f5c542;color:#111;font-weight:900;text-decoration:none}}
 .btn.secondary{{background:rgba(15,23,42,.85);color:#e5e7eb}}
-.small{{opacity:.85}}
 </style></head><body>
 <div class='wrap'>
   <div class='card'>
     <h2 style='margin:0 0 8px 0'>Signature enregistrée ✅</h2>
-    <div class='small'>Statut actuel: <b>{esc(status)}</b></div>
-    <p style='margin:10px 0'>Vous pouvez télécharger une version PDF (via impression) du contrat signé.</p>
+    <p style='margin:0 0 10px 0'>Vous pouvez maintenant télécharger une version PDF (via impression) du contrat signé.</p>
     <a class='btn' href='/contract/print?id={urllib.parse.quote(cid)}' target='_blank'>Télécharger PDF (imprimer)</a>
     <a class='btn secondary' href='/contract?id={urllib.parse.quote(cid)}' target='_blank'>Voir le contrat</a>
   </div>
@@ -893,21 +883,29 @@ body{{margin:0;font-family:system-ui;background:#0b0f19;color:#e5e7eb}}
 </body></html>"""
                 return self.send_html(html)
 
+            # mapper (optional)
+            if path == "/mapper":
+                pageno = int(q.get("page", ["1"])[0] or "1")
+                pages = sorted(glob.glob(os.path.join(ASSETS, "page_*.png")))
+                if pageno < 1 or pageno > len(pages):
+                    return self.send_text("bad page", 400)
+                img = os.path.basename(pages[pageno-1])
+                tpl = read_text(os.path.join(WWW, "mapper.html"))
+                html = tpl.replace("<!--PAGENO-->", str(pageno)).replace("<!--IMGURL-->", f"/assets/{esc(img)}")
+                return self.send_html(html)
+
             return self.send_text("Not found", 404)
 
-        except Exception as e:
-            # Prevent Render 502 by always returning a response
-            return self.send_text(f"Server error: {e}", 500)
+        except Exception:
+            self.log_exception()
+            return self.send_text("Server error (see logs).", 500)
 
-    # --------
-    # POST
-    # --------
     def do_POST(self):
         try:
             u = urllib.parse.urlparse(self.path)
             path = u.path
 
-            # POST alias for UI mismatch
+            # aliases
             if path == "/contracts/save":    path = "/contract/save"
             if path == "/contracts/compute": path = "/contract/compute"
             if path == "/contracts/send":    path = "/contract/send"
@@ -921,9 +919,11 @@ body{{margin:0;font-family:system-ui;background:#0b0f19;color:#e5e7eb}}
             if path == "/login":
                 username = (form.get("username") or "").strip()
                 password = (form.get("password") or "").strip()
+
                 s = self.settings()
                 users = s.get("sales_users") or {}
                 urec = users.get(username) if isinstance(users, dict) else None
+
                 if not (isinstance(urec, dict) and urec.get("password") == password):
                     tpl = read_text(os.path.join(WWW, "login.html"))
                     tpl = tpl.replace("<!--ERROR-->", "Identifiants invalides.")
@@ -995,29 +995,6 @@ body{{margin:0;font-family:system-ui;background:#0b0f19;color:#e5e7eb}}
 
                 calc = compute_calculations(fields)
 
-                calc["pricing.subtotal"] = calc.get("Prix_de_vente_avant_taxes", "")
-                calc["pricing.tps"] = calc.get("TPS_5_730072220RT0001", "")
-                calc["pricing.tvq"] = calc.get("TVQ_9975_1232208119TQ0001", "")
-                calc["pricing.total_with_tax"] = calc.get("Total_prix_de_vente_avec_taxes", "")
-
-                try:
-                    total_with_tax_num = float(calc.get("Total_prix_de_vente_avec_taxes", "0") or 0)
-                except Exception:
-                    total_with_tax_num = 0.0
-
-                calc["payments.no_finance.amount_at_measure"] = money(total_with_tax_num * 0.40)
-                calc["payments.no_finance.amount_pre_delivery"] = money(total_with_tax_num * 0.60)
-                calc["undefined"] = calc["payments.no_finance.amount_at_measure"]
-                calc["undefined_2"] = calc["payments.no_finance.amount_pre_delivery"]
-
-                if cid:
-                    b = load_bundle(cid)
-                    b["fields"] = fields if isinstance(fields, dict) else {}
-                    b["calc"] = calc if isinstance(calc, dict) else {}
-                    save_bundle(cid, b)
-                    write_json(os.path.join(cdir(cid), "fields.json"), b["fields"])
-                    write_json(os.path.join(cdir(cid), "calc.json"), b["calc"])
-
                 payload = json.dumps({"ok": True, "calc": calc}, ensure_ascii=False).encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -1026,90 +1003,82 @@ body{{margin:0;font-family:system-ui;background:#0b0f19;color:#e5e7eb}}
                 self.wfile.write(payload)
                 return
 
-            # SEND (manual): creates 2 tokens, logs links, shows copy page
+            # SEND (generate links + optional smtp)
             if path == "/contract/send":
                 cid = (form.get("contract_id") or "").strip()
                 client_email = (form.get("client_email") or "").strip()
                 rep_email = (form.get("rep_email") or "").strip()
                 if not cid or not client_email or not rep_email:
-                    return self.send_text("missing contract_id/client_email/rep_email", 400)
-                ensure_contract(cid)
+                    return self.send_text("missing", 400)
 
-                # creating tokens implies "to_sign"
+                ensure_contract(cid)
                 set_status(cid, "to_sign")
 
                 t_client = store_token(cid, "client", client_email)
                 t_rep = store_token(cid, "rep", rep_email)
 
+                settings = load_settings()  # includes secrets/env overrides
                 base = base_url(self)
                 link_client = f"{base}/sign?token={t_client}"
                 link_rep = f"{base}/sign?token={t_rep}"
 
+                subject = "Signature requise — Contrat Cuisines 9999"
+                ok1, msg1 = send_email(settings, client_email, subject,
+                    f"Bonjour,\n\nVeuillez signer le contrat via ce lien:\n{link_client}\n\nMerci,\nCuisines 9999\n")
+                ok2, msg2 = send_email(settings, rep_email, subject,
+                    f"Bonjour,\n\nVeuillez signer (représentant) via ce lien:\n{link_rep}\n\nMerci,\nCuisines 9999\n")
+
                 write_json(os.path.join(cdir(cid), "email_log.json"), {
-                    "generated_at": now_iso(),
+                    "sent_at": now_iso(),
                     "client_email": client_email,
                     "rep_email": rep_email,
                     "client_link": link_client,
                     "rep_link": link_rep,
-                    "note": "Manual send (no SMTP on Render)",
+                    "smtp_client": {"ok": ok1, "msg": msg1},
+                    "smtp_rep": {"ok": ok2, "msg": msg2},
                 })
 
-                # Show links immediately (no redirect, no mystery)
-                html = f"""<!doctype html><html lang="fr"><head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Liens de signature</title>
+                # Always show links so you can manual-send even if SMTP fails/disabled
+                html = f"""<!doctype html><html lang='fr'><head>
+<meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>
+<title>Liens générés — {esc(cid)}</title>
 <style>
 body{{margin:0;font-family:system-ui;background:#0b0f19;color:#e5e7eb}}
-.wrap{{max-width:900px;margin:40px auto;padding:0 16px}}
-.card{{background:rgba(15,23,42,.70);border:1px solid rgba(255,255,255,.12);border-radius:18px;padding:18px}}
-h2{{margin:0 0 10px 0}}
-.p{{opacity:.9;line-height:1.4}}
-.row{{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin:12px 0}}
-.label{{font-weight:900;min-width:140px}}
-.input{{flex:1;min-width:260px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.14);color:#e5e7eb;
-padding:10px 12px;border-radius:12px;font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace}}
-.btn{{appearance:none;border:1px solid rgba(255,255,255,.14);background:#f5c542;color:#111;
-padding:10px 12px;border-radius:12px;cursor:pointer;font-weight:900;text-decoration:none}}
-.btn.secondary{{background:rgba(255,255,255,.06);color:#e5e7eb}}
-.small{{font-size:12px;opacity:.8}}
-hr{{border:none;border-top:1px solid rgba(255,255,255,.12);margin:14px 0}}
-</style>
-</head><body>
-<div class="wrap">
-  <div class="card">
-    <h2>Liens générés ✅</h2>
-    <div class="p">Copiez/collez ces liens dans Proton (ou SMS). Envoi manuel (Render sans SMTP).</div>
-    <div class="small">Contrat: <b>{esc(cid)}</b> — Statut: <b>to_sign</b></div>
-    <hr>
+.wrap{{max-width:840px;margin:26px auto;padding:0 16px}}
+.card{{background:rgba(15,23,42,.65);border:1px solid rgba(255,255,255,.12);border-radius:18px;padding:18px}}
+.btn{{display:inline-block;margin-top:14px;border:1px solid rgba(255,255,255,.12);border-radius:14px;padding:10px 14px;background:#f5c542;color:#111;font-weight:900;text-decoration:none}}
+.btn.secondary{{background:rgba(15,23,42,.85);color:#e5e7eb}}
+.row{{margin:10px 0;padding:10px;border-radius:14px;border:1px solid rgba(255,255,255,.10);background:rgba(0,0,0,.20)}}
+.small{{font-size:12px;opacity:.85}}
+code{{word-break:break-all}}
+</style></head><body>
+<div class='wrap'>
+  <div class='card'>
+    <h2 style='margin:0 0 10px 0'>Liens de signature générés ✅</h2>
+    <div class='small'>Contrat: <b>{esc(cid)}</b> — Statut: <b>to_sign</b></div>
 
-    <div class="row">
-      <div class="label">Client</div>
-      <input class="input" id="l1" value="{esc(link_client)}" readonly>
-      <button class="btn" onclick="copy('l1')">Copier</button>
-      <a class="btn secondary" href="{esc(link_client)}" target="_blank">Ouvrir</a>
+    <div class='row'>
+      <div style='font-weight:900'>Client</div>
+      <div class='small'>Email: {esc(client_email)}</div>
+      <div><code>{esc(link_client)}</code></div>
     </div>
 
-    <div class="row">
-      <div class="label">Représentant</div>
-      <input class="input" id="l2" value="{esc(link_rep)}" readonly>
-      <button class="btn" onclick="copy('l2')">Copier</button>
-      <a class="btn secondary" href="{esc(link_rep)}" target="_blank">Ouvrir</a>
+    <div class='row'>
+      <div style='font-weight:900'>Représentant</div>
+      <div class='small'>Email: {esc(rep_email)}</div>
+      <div><code>{esc(link_rep)}</code></div>
     </div>
 
-    <hr>
-    <a class="btn secondary" href="/contract?id={urllib.parse.quote(cid)}">Retour au contrat</a>
-    <a class="btn secondary" href="/contract/print?id={urllib.parse.quote(cid)}" target="_blank">Voir PDF (imprimer)</a>
+    <div class='row'>
+      <div style='font-weight:900'>SMTP (optionnel)</div>
+      <div class='small'>Client: {esc(msg1)} | Rep: {esc(msg2)}</div>
+      <div class='small'>Si SMTP est désactivé/bloqué sur Render, copie-colle les liens manuellement.</div>
+    </div>
+
+    <a class='btn secondary' href='/contract?id={urllib.parse.quote(cid)}'>Retour au contrat</a>
+    <a class='btn' href='/contract/print?id={urllib.parse.quote(cid)}' target='_blank'>Voir version imprimable</a>
   </div>
 </div>
-
-<script>
-function copy(id){{
-  const el = document.getElementById(id);
-  if(!el) return;
-  el.focus(); el.select();
-  try{{ document.execCommand('copy'); }}catch(e){{}}
-}}
-</script>
 </body></html>"""
                 return self.send_html(html)
 
@@ -1173,15 +1142,14 @@ function copy(id){{
                 all_tokens[token]["used_at"] = now_iso()
                 write_json(tp, all_tokens)
 
-                # updates status to signed_client / signed_rep / signed
                 mark_signed_if_complete(cid)
-
                 return self.redirect(f"/sign/done?cid={urllib.parse.quote(cid)}")
 
             return self.send_text("Not found", 404)
 
-        except Exception as e:
-            return self.send_text(f"Server error: {e}", 500)
+        except Exception:
+            self.log_exception()
+            return self.send_text("Server error (see logs).", 500)
 
     # -------------
     # Response helpers
